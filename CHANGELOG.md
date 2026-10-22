@@ -2,6 +2,10 @@
 
 ## 0.7.0 (unreleased)
 
+- Add an Aiken frontend for `.ak` files, including validator contracts and
+  all six purpose handlers plus the fallback, helper functions, custom types,
+  imports, and direct/pipeline calls. Validator handlers are untrusted API
+  entrypoints; higher-order dispatch remains uncertain.
 - Detect parameter types/defaults, return and exception types, generic
   parameters, declaration attributes, and node kind/origin/name changes in
   structural diffs. Edge differences include confidence; confidence changes

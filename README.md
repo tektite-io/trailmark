@@ -11,7 +11,7 @@ other relationships, then lets you ask structural questions about it:
 - Which functions write this Solidity storage variable?
 - Where did call resolution stop, so that reachability results are incomplete?
 
-It supports 30 languages through [tree-sitter](https://tree-sitter.github.io/),
+It supports 31 languages through [tree-sitter](https://tree-sitter.github.io/),
 stores the graph in [rustworkx](https://www.rustworkx.org/), and exposes it
 through a command-line tool and a Python API. Trailmark was built for security
 review: every edge records whether it came straight from syntax or from a
@@ -218,6 +218,7 @@ for working with proxies.
 | Go | `.go` | `go` | functions, methods, structs, interfaces |
 | Rust | `.rs` | `rust` | functions, structs, traits, enums, impl blocks, `verus!` blocks |
 | Solidity | `.sol` | `solidity` | contracts, interfaces, libraries, functions, modifiers, structs, enums, state variables |
+| Aiken | `.ak` | `aiken` | validators, handlers, helper functions, custom types, imports, direct and pipeline calls |
 | Cairo | `.cairo` | `cairo` | functions, traits, structs, enums, impl blocks, StarkNet contracts |
 | Circom | `.circom` | `circom` | templates, functions, signals, components |
 | Haskell | `.hs` | `haskell` | functions, data types, type classes, instances |

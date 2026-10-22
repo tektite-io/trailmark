@@ -52,6 +52,7 @@ one wins.
 | Haskell | top-level `main` |
 | Erlang | functions listed in `-export([...])` |
 | Solidity | `public` and `external` functions, `fallback`, and `receive` (see below) |
+| Aiken | validator `mint`, `spend`, `withdraw`, `publish`, `vote`, `propose`, and explicit `else` handlers |
 | Cairo / StarkNet | `#[external]`, `#[view]`, `#[l1_handler]`, `#[constructor]` |
 | Circom | `component main`, represented as a synthetic `main` function tagged `user_input`, `untrusted_external`, `high` |
 | Miden Assembly | `export.<name>` procedures |

@@ -7,6 +7,7 @@ header handling, and cross-file linking, are in [Graph model](graph-model.md).
 
 - [Rust and Verus](#rust-and-verus)
 - [Solidity persistent state](#solidity-persistent-state)
+- [Aiken](#aiken)
 - [TypeScript](#typescript)
 - [SQL](#sql)
 - [C, C++, and Objective-C headers](#c-c-and-objective-c-headers)
@@ -112,6 +113,24 @@ an EVM storage-slot or mapping-key analysis.
 - State edges do not change the default call traversals.
 - An absent edge is not proof that a function cannot access storage.
 - Other language parsers do not yet emit state-access edges.
+
+## Aiken
+
+The `.ak` frontend represents validators as contracts and their handlers as
+methods, for example `file:payments.spend`. All six purposes (`mint`, `spend`,
+`withdraw`, `publish`, `vote`, `propose`) and explicit `else` fallbacks are
+untrusted API entrypoints. Helper functions and tests are extracted without
+being promoted to entrypoints. Custom records, enums, type aliases (represented
+as structs with `aiken_type_kind=alias`), and import dependencies are retained.
+
+Direct calls and pipeline stages resolve to known lexical functions or explicit
+same-file validator handlers. Parameters and pattern bindings conservatively
+shadow names throughout a function. Anonymous functions get separate nodes
+with byte-offset IDs; their calls and branches belong to those nodes. Editing
+earlier source can change these IDs. Passing a function as an argument does not
+create a call edge to it. Imported/aliased calls and higher-order dispatch stay
+uncertain; Trailmark does not evaluate Plutus scripts or infer callback targets.
+Aiken syntax errors produce a warning and can leave an incomplete graph.
 
 ## TypeScript
 

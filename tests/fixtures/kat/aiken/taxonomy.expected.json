@@ -1,0 +1,414 @@
+{
+  "edges": [
+    {
+      "confidence": "certain",
+      "kind": "imports",
+      "source": "taxonomy",
+      "target": "aiken/collection/list"
+    },
+    {
+      "confidence": "certain",
+      "kind": "contains",
+      "source": "taxonomy",
+      "target": "taxonomy:State"
+    },
+    {
+      "confidence": "certain",
+      "kind": "contains",
+      "source": "taxonomy",
+      "target": "taxonomy:Action"
+    },
+    {
+      "confidence": "certain",
+      "kind": "contains",
+      "source": "taxonomy",
+      "target": "taxonomy:positive"
+    },
+    {
+      "confidence": "certain",
+      "kind": "contains",
+      "source": "taxonomy",
+      "target": "taxonomy:payments"
+    },
+    {
+      "confidence": "certain",
+      "kind": "contains",
+      "source": "taxonomy:payments",
+      "target": "taxonomy:payments.spend"
+    },
+    {
+      "confidence": "certain",
+      "kind": "contains",
+      "source": "taxonomy:payments",
+      "target": "taxonomy:payments.mint"
+    },
+    {
+      "confidence": "certain",
+      "kind": "contains",
+      "source": "taxonomy:payments",
+      "target": "taxonomy:payments.else"
+    },
+    {
+      "confidence": "certain",
+      "kind": "contains",
+      "source": "taxonomy",
+      "target": "taxonomy:positive_test"
+    },
+    {
+      "confidence": "certain",
+      "kind": "calls",
+      "source": "taxonomy:payments.spend",
+      "target": "taxonomy:positive"
+    },
+    {
+      "confidence": "certain",
+      "kind": "calls",
+      "source": "taxonomy:payments.mint",
+      "target": "taxonomy:positive"
+    },
+    {
+      "confidence": "certain",
+      "kind": "calls",
+      "source": "taxonomy:positive_test",
+      "target": "taxonomy:positive"
+    }
+  ],
+  "language": "aiken",
+  "nodes": {
+    "taxonomy": {
+      "branches": [],
+      "cyclomatic_complexity": null,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy",
+      "kind": "module",
+      "location": {
+        "end_col": 0,
+        "end_line": 16,
+        "file_path": "taxonomy.ak",
+        "start_col": 0,
+        "start_line": 1
+      },
+      "name": "taxonomy",
+      "parameters": [],
+      "return_type": null
+    },
+    "taxonomy:Action": {
+      "attributes": {
+        "aiken_type_kind": "enum"
+      },
+      "branches": [],
+      "cyclomatic_complexity": null,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy:Action",
+      "kind": "enum",
+      "location": {
+        "end_col": 33,
+        "end_line": 3,
+        "file_path": "taxonomy.ak",
+        "start_col": 0,
+        "start_line": 3
+      },
+      "name": "Action",
+      "parameters": [],
+      "return_type": null
+    },
+    "taxonomy:State": {
+      "attributes": {
+        "aiken_type_kind": "struct"
+      },
+      "branches": [],
+      "cyclomatic_complexity": null,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy:State",
+      "kind": "struct",
+      "location": {
+        "end_col": 29,
+        "end_line": 2,
+        "file_path": "taxonomy.ak",
+        "start_col": 0,
+        "start_line": 2
+      },
+      "name": "State",
+      "parameters": [],
+      "return_type": null
+    },
+    "taxonomy:payments": {
+      "attributes": {
+        "aiken_validator": true
+      },
+      "branches": [],
+      "cyclomatic_complexity": null,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy:payments",
+      "kind": "contract",
+      "location": {
+        "end_col": 1,
+        "end_line": 14,
+        "file_path": "taxonomy.ak",
+        "start_col": 0,
+        "start_line": 5
+      },
+      "name": "payments",
+      "parameters": [
+        {
+          "default": null,
+          "name": "owner",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "ByteArray"
+          }
+        }
+      ],
+      "return_type": null
+    },
+    "taxonomy:payments.else": {
+      "attributes": {
+        "aiken_handler": "else"
+      },
+      "branches": [],
+      "cyclomatic_complexity": 1,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy:payments.else",
+      "kind": "method",
+      "location": {
+        "end_col": 18,
+        "end_line": 13,
+        "file_path": "taxonomy.ak",
+        "start_col": 2,
+        "start_line": 13
+      },
+      "name": "else",
+      "parameters": [
+        {
+          "default": null,
+          "name": "_",
+          "type_ref": null
+        }
+      ],
+      "return_type": {
+        "generic_args": [],
+        "module": null,
+        "name": "Bool"
+      }
+    },
+    "taxonomy:payments.mint": {
+      "attributes": {
+        "aiken_handler": "mint"
+      },
+      "branches": [],
+      "cyclomatic_complexity": 1,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy:payments.mint",
+      "kind": "method",
+      "location": {
+        "end_col": 77,
+        "end_line": 12,
+        "file_path": "taxonomy.ak",
+        "start_col": 2,
+        "start_line": 12
+      },
+      "name": "mint",
+      "parameters": [
+        {
+          "default": null,
+          "name": "redeemer",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "Int"
+          }
+        },
+        {
+          "default": null,
+          "name": "_policy",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "ByteArray"
+          }
+        },
+        {
+          "default": null,
+          "name": "_tx",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "Data"
+          }
+        }
+      ],
+      "return_type": {
+        "generic_args": [],
+        "module": null,
+        "name": "Bool"
+      }
+    },
+    "taxonomy:payments.spend": {
+      "attributes": {
+        "aiken_handler": "spend"
+      },
+      "branches": [
+        {
+          "complexity_contribution": 1,
+          "condition": "Some(state) -> positive(redeemer)",
+          "location": {
+            "end_col": 39,
+            "end_line": 8,
+            "file_path": "taxonomy.ak",
+            "start_col": 6,
+            "start_line": 8
+          }
+        },
+        {
+          "complexity_contribution": 1,
+          "condition": "None -> False",
+          "location": {
+            "end_col": 19,
+            "end_line": 9,
+            "file_path": "taxonomy.ak",
+            "start_col": 6,
+            "start_line": 9
+          }
+        }
+      ],
+      "cyclomatic_complexity": 3,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy:payments.spend",
+      "kind": "method",
+      "location": {
+        "end_col": 3,
+        "end_line": 11,
+        "file_path": "taxonomy.ak",
+        "start_col": 2,
+        "start_line": 6
+      },
+      "name": "spend",
+      "parameters": [
+        {
+          "default": null,
+          "name": "datum",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "Option<State>"
+          }
+        },
+        {
+          "default": null,
+          "name": "redeemer",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "Int"
+          }
+        },
+        {
+          "default": null,
+          "name": "_ref",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "Data"
+          }
+        },
+        {
+          "default": null,
+          "name": "_tx",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "Data"
+          }
+        }
+      ],
+      "return_type": {
+        "generic_args": [],
+        "module": null,
+        "name": "Bool"
+      }
+    },
+    "taxonomy:positive": {
+      "branches": [],
+      "cyclomatic_complexity": 1,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy:positive",
+      "kind": "function",
+      "location": {
+        "end_col": 37,
+        "end_line": 4,
+        "file_path": "taxonomy.ak",
+        "start_col": 0,
+        "start_line": 4
+      },
+      "name": "positive",
+      "parameters": [
+        {
+          "default": null,
+          "name": "n",
+          "type_ref": {
+            "generic_args": [],
+            "module": null,
+            "name": "Int"
+          }
+        }
+      ],
+      "return_type": {
+        "generic_args": [],
+        "module": null,
+        "name": "Bool"
+      }
+    },
+    "taxonomy:positive_test": {
+      "attributes": {
+        "aiken_test": true
+      },
+      "branches": [],
+      "cyclomatic_complexity": 1,
+      "docstring": null,
+      "exception_types": [],
+      "id": "taxonomy:positive_test",
+      "kind": "function",
+      "location": {
+        "end_col": 36,
+        "end_line": 15,
+        "file_path": "taxonomy.ak",
+        "start_col": 0,
+        "start_line": 15
+      },
+      "name": "positive_test",
+      "parameters": [],
+      "return_type": null
+    }
+  },
+  "root_path": "taxonomy.ak",
+  "schema_version": 1,
+  "subgraphs": {},
+  "summary": {
+    "call_edges": 3,
+    "classes": 0,
+    "dependencies": [
+      "aiken/collection/list"
+    ],
+    "entrypoints": 0,
+    "functions": 5,
+    "languages": [
+      "aiken"
+    ],
+    "proxies": 0,
+    "source_file_counts": {
+      "aiken": 1
+    },
+    "source_files": 1,
+    "total_nodes": 9
+  },
+  "trailmark_version": "<trailmark-version>"
+}
