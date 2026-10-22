@@ -290,6 +290,13 @@ def _detect_for_unit(
         return _detect_rust(cache, unit, path)
     if extension == ".sol":
         return _detect_solidity(cache, unit, path)
+    if extension == ".ak" and _unit_attr(unit, "aiken_handler"):
+        return EntrypointTag(
+            kind=EntrypointKind.API,
+            trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
+            description="Aiken validator handler",
+            asset_value=AssetValue.HIGH,
+        )
     if extension in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
         return _detect_js_ts(cache, unit, path)
     if extension == ".java":

@@ -220,6 +220,7 @@ for working with proxies.
 | Go | `.go` | `go` | functions, methods, structs, interfaces |
 | Rust | `.rs` | `rust` | functions, structs, traits, enums, impl blocks, `verus!` blocks |
 | Solidity | `.sol` | `solidity` | contracts, interfaces, libraries, functions, modifiers, structs, enums, state variables |
+| Aiken | `.ak` | `aiken` | validators, handlers, helper functions, custom types, imports, direct and pipeline calls |
 | Cairo | `.cairo` | `cairo` | functions, traits, structs, enums, impl blocks, StarkNet contracts |
 | Circom | `.circom` | `circom` | templates, functions, signals, components |
 | Haskell | `.hs` | `haskell` | functions, data types, type classes, instances |

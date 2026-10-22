@@ -159,6 +159,8 @@ PINNED_CONTRACTS: tuple[tuple[str, str], ...] = (
     ("docs/languages.md", "syntax errors produce a warning"),
     # Solidity persistent state
     ("docs/languages.md", "state_variable"),
+    ("docs/languages.md", "file:payments.spend"),
+    ("docs/languages.md", "Imported/aliased calls and higher-order dispatch stay uncertain"),
     ("docs/languages.md", "An absent edge is not proof"),
     ("docs/languages.md", "storage aliases"),
     ("docs/languages.md", "Other language parsers do not yet emit state-access edges"),
