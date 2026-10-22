@@ -158,6 +158,7 @@
     }
   },
   "root_path": "taxonomy.thrift",
+  "schema_version": 1,
   "subgraphs": {},
   "summary": {
     "call_edges": 0,
@@ -167,7 +168,15 @@
     ],
     "entrypoints": 0,
     "functions": 2,
+    "languages": [
+      "thrift"
+    ],
     "proxies": 0,
+    "source_file_counts": {
+      "thrift": 1
+    },
+    "source_files": 1,
     "total_nodes": 5
-  }
+  },
+  "trailmark_version": "<trailmark-version>"
 }

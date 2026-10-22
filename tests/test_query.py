@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from trailmark import __version__
 from trailmark.models import (
     AnnotationKind,
     AssetValue,
@@ -464,6 +466,24 @@ class TestQueryEngineComplexity:
 
 
 class TestQueryEngineSummary:
+    def test_source_coverage_and_empty_input(self, tmp_path: Path) -> None:
+        (tmp_path / "app.rs").write_text("fn main() {}")
+        with pytest.raises(ValueError, match="No source files inspected"):
+            QueryEngine.from_directory(str(tmp_path))
+        assert (
+            QueryEngine.from_directory(str(tmp_path), allow_empty=True).summary()["source_files"]
+            == 0
+        )
+        engine = QueryEngine.from_directory(str(tmp_path), "python,rust")
+        summary = engine.summary()
+        assert summary["languages"] == ["python", "rust"]
+        assert summary["source_files"] == 1
+        assert summary["source_file_counts"] == {"python": 0, "rust": 1}
+        summary["source_file_counts"]["rust"] = 99
+        summary["languages"].clear()
+        assert engine.summary()["source_file_counts"] == {"python": 0, "rust": 1}
+        assert json.loads(engine.to_json())["summary"]["languages"] == ["python", "rust"]
+
     def test_dependencies_result_is_a_copy(self) -> None:
         engine = _build_engine()
         engine.summary()["dependencies"].append("outside")
@@ -487,6 +507,9 @@ class TestQueryEngineSummary:
             "call_edges",
             "dependencies",
             "entrypoints",
+            "languages",
+            "source_files",
+            "source_file_counts",
         }
 
     def test_summary_with_classes(self) -> None:
@@ -543,6 +566,8 @@ class TestToJson:
         engine = _build_engine()
         data = json.loads(engine.to_json())
         assert set(data.keys()) == {
+            "trailmark_version",
+            "schema_version",
             "language",
             "root_path",
             "summary",
@@ -552,6 +577,11 @@ class TestToJson:
         }
         assert len(data["nodes"]) == 3
         assert len(data["edges"]) == 2
+
+    def test_to_json_provenance(self) -> None:
+        data = json.loads(_build_engine().to_json())
+        assert data["trailmark_version"] == __version__
+        assert data["schema_version"] == 1
 
     def test_to_json_edge_dict_exact(self) -> None:
         """Each edge dict must have exact keys and values."""

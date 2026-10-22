@@ -758,6 +758,7 @@
     }
   },
   "root_path": "taxonomy.sol",
+  "schema_version": 1,
   "subgraphs": {},
   "summary": {
     "call_edges": 4,
@@ -765,7 +766,15 @@
     "dependencies": [],
     "entrypoints": 0,
     "functions": 9,
+    "languages": [
+      "solidity"
+    ],
     "proxies": 1,
+    "source_file_counts": {
+      "solidity": 1
+    },
+    "source_files": 1,
     "total_nodes": 17
-  }
+  },
+  "trailmark_version": "<trailmark-version>"
 }

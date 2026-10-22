@@ -73,6 +73,9 @@ for offline machines, TLS-inspecting proxies, and building from a checkout.
 # Node and edge counts for a Python project (Python is the default language)
 trailmark analyze --summary path/to/project
 
+# The same summary as JSON, including source-file counts per language (v0.7+)
+trailmark analyze --summary --json --language auto path/to/project
+
 # Full JSON graph of every supported language in the tree
 trailmark analyze --language auto path/to/project > graph.json
 
@@ -88,6 +91,12 @@ trailmark diagram -t path/to/project -T call-graph -f handle_request
 # How many call sites could not be resolved, grouped by callee name
 trailmark analyze --language rust --resolution path/to/project
 ```
+
+Directory analysis rejects missing roots and zero matching source files. The
+summary includes selected languages and inspected file counts; use
+`--allow-empty` for an intentional empty input.
+Graph JSON includes the exporting Trailmark version and an export schema version
+(v0.7+); compare snapshots built with the same Trailmark version and languages.
 
 The same questions from Python:
 

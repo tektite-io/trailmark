@@ -668,6 +668,7 @@
     }
   },
   "root_path": "taxonomy.c",
+  "schema_version": 1,
   "subgraphs": {},
   "summary": {
     "call_edges": 9,
@@ -679,7 +680,15 @@
     ],
     "entrypoints": 0,
     "functions": 7,
+    "languages": [
+      "c"
+    ],
     "proxies": 3,
+    "source_file_counts": {
+      "c": 1
+    },
+    "source_files": 1,
     "total_nodes": 13
-  }
+  },
+  "trailmark_version": "<trailmark-version>"
 }

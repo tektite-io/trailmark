@@ -526,6 +526,7 @@
     }
   },
   "root_path": "taxonomy.dart",
+  "schema_version": 1,
   "subgraphs": {},
   "summary": {
     "call_edges": 2,
@@ -533,7 +534,15 @@
     "dependencies": [],
     "entrypoints": 0,
     "functions": 8,
+    "languages": [
+      "dart"
+    ],
     "proxies": 1,
+    "source_file_counts": {
+      "dart": 1
+    },
+    "source_files": 1,
     "total_nodes": 13
-  }
+  },
+  "trailmark_version": "<trailmark-version>"
 }

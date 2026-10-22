@@ -7,6 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 import trailmark.parse as _parse_api
+from trailmark import __version__
 from trailmark.analysis.augment import augment_from_sarif, augment_from_weaudit
 from trailmark.analysis.binary import augment_from_binary_graph
 from trailmark.analysis.diff import compute_diff
@@ -41,6 +42,7 @@ class QueryEngine:
         language: str = "python",
         *,
         detect_entrypoints_: bool = True,
+        allow_empty: bool = False,
     ) -> QueryEngine:
         """Parse a directory and return a ready-to-query engine.
 
@@ -49,12 +51,16 @@ class QueryEngine:
         language with at least one matching file under ``path``, or a
         comma-separated list like ``"python,rust"`` for an explicit set.
 
+        Missing/non-directory roots and zero inspected source files raise
+        ``ValueError``. Set ``allow_empty=True`` for an intentional empty
+        input. ``summary()`` reports selected languages and source-file counts.
+
         Entrypoint detection runs automatically so that ``attack_surface()``
         and the entrypoint-dependent preanalysis passes have data to work
         with. Pass ``detect_entrypoints_=False`` to skip it (e.g. when the
         caller wants to drive detection separately).
         """
-        graph = _parse_api.parse_directory(path, language=language)
+        graph = _parse_api.parse_directory(path, language=language, allow_empty=allow_empty)
         if detect_entrypoints_:
             graph.entrypoints.update(detect_entrypoints(graph, path))
         store = GraphStore(graph)
@@ -311,6 +317,7 @@ class QueryEngine:
         graph = store._graph  # noqa: SLF001
         funcs = [n for n in graph.nodes.values() if n.kind.value in ("function", "method")]
         call_edges = [e for e in graph.edges if e.kind.value == "calls"]
+        source_file_counts = store.source_file_counts()
         return {
             "total_nodes": len(graph.nodes),
             "functions": len(funcs),
@@ -319,6 +326,9 @@ class QueryEngine:
             "call_edges": len(call_edges),
             "dependencies": list(graph.dependencies),
             "entrypoints": len(graph.entrypoints),
+            "languages": list(source_file_counts),
+            "source_files": sum(source_file_counts.values()),
+            "source_file_counts": source_file_counts,
         }
 
     def unresolved_calls(self, name: str | None = None) -> list[dict[str, Any]]:
@@ -477,11 +487,14 @@ class QueryEngine:
     def to_json(self, indent: int = 2) -> str:
         """Export topology, selected node metadata, subgraphs, and summary.
 
+        Includes the exporting Trailmark version and JSON schema version.
         Annotations, entrypoint tags, and call-site locations are omitted;
         this export does not preserve all analysis state for persistence.
         """
         graph = self._store._graph  # noqa: SLF001
         data = {
+            "trailmark_version": __version__,
+            "schema_version": 1,
             "language": graph.language,
             "root_path": graph.root_path,
             "summary": self.summary(),
