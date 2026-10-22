@@ -48,6 +48,7 @@ PARSER_FIXTURES: list[tuple[str, str]] = [
     ("powershell", "taxonomy"),
     ("proto", "taxonomy"),
     ("python", "taxonomy"),
+    ("r", "taxonomy"),
     ("rego", "taxonomy"),
     ("ruby", "taxonomy"),
     ("rust", "taxonomy"),
