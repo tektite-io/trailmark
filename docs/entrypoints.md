@@ -46,6 +46,7 @@ one wins.
 | Lua | generic named `main` only; use overrides for chunk execution and host callbacks |
 | Go | `http.HandleFunc` / `http.Handle` registrations, gin/chi/echo-style `<router>.GET/POST/...` registrations |
 | Rust | actix-web, rocket, FFI exports (`#[no_mangle]`, `pub extern "C"`), async-main attributes |
+| Zig | `export fn` declarations; `main` uses the generic CLI rule |
 | C / C++ | `extern "C"` linkage, `__attribute__((visibility("default")))`, `__declspec(dllexport)` |
 | Swift | Explicit `static` or `class` `main` methods declared inside `@main` types |
 | Objective-C | `UIApplicationDelegate` lifecycle selectors such as `application:openURL:options:` |

@@ -234,6 +234,7 @@ for working with proxies.
 | Tact | `.tact` | `tact` | contracts, structs, receivers, functions |
 | Func | `.fc`, `.func` | `func` | functions, includes, direct calls |
 | Sway | `.sw` | `sway` | ABI interfaces, structs, impl methods, functions |
+| Zig | `.zig` | `zig` | Functions, named structs/enums/unions, container methods, imports, direct calls |
 | Rego | `.rego` | `rego` | packages, imports, policy rules, rule calls |
 | Proto | `.proto` | `proto` | services, RPCs, messages, fields, enums |
 | Thrift | `.thrift` | `thrift` | services, functions, structs, fields, enums |
