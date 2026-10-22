@@ -2,10 +2,6 @@
 
 ## 0.7.0 (unreleased)
 
-- Add an Aiken frontend for `.ak` files, including validator contracts and
-  all six purpose handlers plus the fallback, helper functions, custom types,
-  imports, and direct/pipeline calls. Validator handlers are untrusted API
-  entrypoints; higher-order dispatch remains uncertain.
 - Detect parameter types/defaults, return and exception types, generic
   parameters, declaration attributes, and node kind/origin/name changes in
   structural diffs. Edge differences include confidence; confidence changes
@@ -27,6 +23,10 @@
   `writes` edges from functions, constructors, and modifiers, one per
   occurrence. Query them with `state_read_by()`, `state_written_by()`,
   `readers_of()`, and `writers_of()` (#84).
+- Add an Aiken frontend for `.ak` files, including validator contracts and
+  all six purpose handlers plus the fallback, helper functions, custom types,
+  imports, and direct/pipeline calls. Validator handlers are untrusted API
+  entrypoints; higher-order dispatch remains uncertain.
 - Add `trailmark analyze --resolution`, `QueryEngine.call_resolution()`, and
   `QueryEngine.unresolved_calls(name=None)` for counting and inspecting
   unresolved call sites. Document Rust call-resolution limits (#85).
