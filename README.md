@@ -221,6 +221,7 @@ for working with proxies.
 | C# | `.cs` | `c_sharp` | methods, classes, interfaces, structs, enums, namespaces |
 | PowerShell | `.ps1`, `.psm1` | `powershell` | functions, filters, classes, methods, script blocks, parameters, command calls, imports |
 | Java | `.java` | `java` | methods, classes, interfaces, enums |
+| VB.NET | `.vb` | `vb` | namespaces, modules, types, methods, constructors/accessors, lambdas, overloads, direct calls |
 | Go | `.go` | `go` | functions, methods, structs, interfaces |
 | Rust | `.rs` | `rust` | functions, structs, traits, enums, impl blocks, `verus!` blocks |
 | Solidity | `.sol` | `solidity` | contracts, interfaces, libraries, functions, modifiers, structs, enums, state variables |

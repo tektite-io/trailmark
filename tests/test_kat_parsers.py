@@ -61,6 +61,7 @@ PARSER_FIXTURES: list[tuple[str, str]] = [
     ("thrift", "taxonomy"),
     ("sql", "taxonomy"),
     ("typescript", "taxonomy"),
+    ("vb", "taxonomy"),
     ("zig", "taxonomy"),
 ]
 
