@@ -35,6 +35,14 @@ Proxy and binary nodes are never matched. Relative and absolute analysis roots
 match the same findings. Findings that overlap no node are counted as
 unmatched.
 
+SARIF artifact indices resolve through the run's `artifacts` array. Relative
+URIs with `uriBaseId` resolve through chained `originalUriBaseIds` before source
+matching. Undefined base IDs (including Semgrep's `%SRCROOT%`) retain the
+analysis-root-relative path behavior. Defined bases must be directory URIs ending
+in `/`; malformed, cyclic, or overly deep chains and invalid artifact indices
+remain unmatched. Resolution is cached per run and capped at 32 links. Relative
+paths cannot climb above a defined base, including encoded `..` segments.
+
 | Input | Annotation | `source` | Subgraphs created |
 | --- | --- | --- | --- |
 | SARIF 2.1.0 result | `finding`, described as `[LEVEL] ruleId: message (tool)` | `sarif:<tool>` | `sarif:<level>` (default level `warning`), `sarif:<tool>` |
@@ -149,3 +157,7 @@ tainted function can be called on a path that starts at an untrusted
 entrypoint, but Trailmark has not shown that attacker-controlled data reaches
 it. Treat it as a way to prioritize review, not as a finding. Unresolved calls
 end each pass at a proxy node; see [Call resolution](call-resolution.md).
+
+SARIF URI paths are percent-decoded exactly once. Node locations and weAudit paths
+are filesystem paths: literal `#`, `?` and `%` characters are preserved, preventing
+matches against other files with similar prefixes.

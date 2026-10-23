@@ -10,9 +10,10 @@ npm ci
 uv sync --locked --all-groups
 ```
 
-`npm ci` installs the pinned Tree-sitter CLI used to generate the bundled Verus
-grammar. Its install script must be enabled; if your npm configuration disables
-scripts, run `npm rebuild tree-sitter-cli --ignore-scripts=false` before syncing.
+`npm ci` installs the pinned Tree-sitter CLI used to generate the bundled Circom,
+Move, and Verus grammars. Its install script must be enabled; if your npm
+configuration disables scripts, run
+`npm rebuild tree-sitter-cli --ignore-scripts=false` before syncing.
 See [docs/installation.md](docs/installation.md#from-a-git-checkout) for how
 generated grammar sources are handled.
 
@@ -138,6 +139,8 @@ lives in `docs/`:
 | `docs/augmenting.md` | SARIF, weAudit, binary imports, annotations, preanalysis |
 | `docs/call-resolution.md` | Resolution diagnostics and limits |
 | `docs/languages.md` | Per-language behavior |
+| `docs/parser-coverage.md` | Callable ownership, identity changes, grammar limits |
+| `docs/skills-compatibility.md` | Skills integration gates and release preflight |
 | `docs/installation.md` | Grammars, offline installs, Nix, checkouts |
 | `docs/entrypoint-patterns.md` | Patterns for writing new entrypoint detectors |
 

@@ -15,3 +15,19 @@ This product bundles the following third-party components:
   Copyright (c) 2017 Maxim Sokolov
   Licensed under the MIT License
   https://github.com/secure-foundations/tree-sitter-verus
+
+- tree-sitter-masm grammar (src/trailmark/tree_sitter_custom/masm/)
+  Copyright (c) 2025 Miden
+  Licensed under the MIT License
+  https://github.com/trailofbits/tree-sitter-masm
+
+- Move grammar (src/trailmark/tree_sitter_custom/move/)
+  Copyright (c) The Move Contributors
+  Licensed under the Apache License, Version 2.0
+  https://github.com/MystenLabs/sui/tree/f3fd7754ebe506e2a8b1cb4e0ddb45be3e5eb6c1/external-crates/move/tooling/tree-sitter
+  Includes MIT-licensed grammar contributions:
+  Copyright (c) 2023 Tim Zakian
+  Copyright (c) 2020 nonsense0202
+  Full MIT notices: src/trailmark/tree_sitter_custom/move/NOTICE
+  Trailmark adds inline/package modifiers, Aptos-style function-type returns,
+  acquires clauses, for ranges, and compound assignment operators.

@@ -93,6 +93,28 @@ def pyproject_data() -> dict[str, object]:
 # ── Pinned contracts ──────────────────────────────────────────────────
 
 PINNED_CONTRACTS: tuple[tuple[str, str], ...] = (
+    ("docs/parser-coverage.md", "Calls keep their normal confidence"),
+    ("docs/parser-coverage.md", "the last definition keeps its plain ID"),
+    ("docs/parser-coverage.md", "Java constructor binding also runs after the directory merge"),
+    ("docs/parser-coverage.md", "arrows inherit lexical `this`"),
+    ("docs/parser-coverage.md", "`{owner}.{name}@ambiguous`"),
+    ("docs/skills-compatibility.md", "current query facade has no confidence"),
+    ("docs/skills-compatibility.md", "SARIF description-only bases"),
+    ("docs/entrypoint-patterns.md", "`pub proc foo` declarations"),
+    (
+        "docs/skills-compatibility.md",
+        "The release tag, pyproject version, runtime version, "
+        "dated changelog heading, wheel metadata and root sdist `PKG-INFO` must agree.",
+    ),
+    ("docs/parser-coverage.md", "Erlang callable IDs include arity: `module:function/2`."),
+    ("docs/parser-coverage.md", "singleton methods use `file:Class.self.method`."),
+    ("docs/parser-coverage.md", "Trait bodies and inherited receivers are not yet extracted"),
+    ("docs/parser-coverage.md", "Logical rules have potential `calls` edges to their clauses"),
+    ("docs/parser-coverage.md", "Constructor patterns do not create calls."),
+    ("docs/parser-coverage.md", "`parse_incomplete` and `syntax_recovered` attributes"),
+    ("docs/parser-coverage.md", "`macro_wrapper`, `source_alias`, and `expansion_alias`"),
+    ("docs/parser-coverage.md", "file-local `static const` objects"),
+    ("docs/installation.md", "Move, and Verus ship as C sources"),
     # Installation and bundled grammars
     ("README.md", "CI tests Python 3.12 through 3.15."),
     ("CONTRIBUTING.md", "CI tests Python 3.12 through 3.15."),
@@ -108,6 +130,7 @@ PINNED_CONTRACTS: tuple[tuple[str, str], ...] = (
     ("docs/installation.md", "Tree-sitter CLI 0.27.1"),
     ("docs/installation.md", "run `npm ci` with npm install scripts enabled"),
     ("docs/installation.md", "generated parser and headers are gitignored"),
+    ("docs/installation.md", "Circom and Move use ABI 14; Verus uses ABI 15"),
     ("docs/installation.md", "installing published packages needs neither"),
     # Mutation testing
     ("CONTRIBUTING.md", "tests.run_mutations --reviewed --workers=4"),
@@ -127,6 +150,11 @@ PINNED_CONTRACTS: tuple[tuple[str, str], ...] = (
     ("docs/cli.md", "Both sides must inspect source files"),
     ("docs/python-api.md", "allow_empty=True"),
     ("docs/python-api.md", "CodeGraph.source_file_counts"),
+    ("docs/python-api.md", "CodeGraph.parse_diagnostics"),
+    ("docs/cli.md", "--strict"),
+    ("docs/augmenting.md", "originalUriBaseIds"),
+    ("docs/languages.md", "Thrift IDs use source-file identity"),
+    ("docs/entrypoints.md", "run_ticktock"),
     ("docs/python-api.md", "parameter_types"),
     ("docs/python-api.md", "parameter_defaults"),
     ("docs/python-api.md", "source_coverage"),
@@ -217,7 +245,10 @@ PINNED_CONTRACTS: tuple[tuple[str, str], ...] = (
     # Configuration files
     ("docs/links.md", "target_external = true"),
     ("docs/links.md", "source_external = true"),
-    ("docs/entrypoints.md", "Invalid entries are skipped silently"),
+    (
+        "docs/entrypoints.md",
+        "Explicit `node` references that match nothing are skipped with a warning",
+    ),
 )
 
 
@@ -582,3 +613,98 @@ def _read_requires_python(pyproject_data: dict[str, object]) -> str:
     value = project.get("requires-python")
     assert isinstance(value, str), "requires-python is missing or not a string"
     return value
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "`file:factory.hidden`",
+        "`binding_blocked`",
+        "TSX grammar",
+        "`unsafe(no_mangle)`",
+        "source-offset",
+        "`$argN`",
+        "lexical package",
+        "`_ENV`",
+        "quoting constructors",
+        "relation/routine namespaces",
+        "`abi(embed_v0)`",
+        "property tests, benchmarks",
+        "destructured arguments",
+        "soft casts",
+        "labeled switch",
+        "`procref`",
+        "`pub proc`",
+        "Bash 5.3",
+        "`coproc`",
+        "`method_id`",
+        "`#declaration`",
+        "`deferred`",
+        "`macro_signature_unresolved`",
+        "`syntax_error_context`",
+        "`assert!(...)`",
+        "`unsupported_syntax`",
+        "`package fun`",
+        "`file:api.init`",
+        "`$operator.plus_plus`",
+        "breadth-first search",
+        "include depth capped at 16",
+        "closure capped at 128 headers",
+        "Compiler `-I` directories are not searched",
+        "platform compatibility shims",
+        "latest preceding definition",
+        "C#, Dart, Java, Objective-C",
+        "builtin.move:assert!",
+        "Arrow-valued class fields retain method kind",
+        "comment between the macro and brace",
+        "`include_unverified=True`",
+        "include closures to break same-name ties",
+        "Block-scope function prototypes",
+        "import aliases of `typing` and `typing_extensions`",
+        "`file:NS.Inner.method`",
+        "`$class@line_column`",
+        "Parameters shadow outer imports through nested callbacks",
+        "matching source file takes precedence over a directory",
+        "curried C# and Dart lambdas",
+        "Extremely deep PHP conditional or parenthesized expressions",
+        "Alias-expanded and fully qualified calls both remain uncertain",
+        "Module `const`/`let` arrows and function expressions",
+    ],
+)
+def test_parser_coverage_contracts(marker: str) -> None:
+    assert marker in _flat("docs/parser-coverage.md")
+
+
+@pytest.mark.parametrize(
+    "marker", ["`import_binding`", "`indirect_call`", "Repeated callables** in Python"]
+)
+def test_round3_graph_model_contracts(marker: str) -> None:
+    assert marker in _flat("docs/graph-model.md")
+
+
+def test_augmentation_filesystem_path_contract() -> None:
+    assert "percent-decoded exactly once" in _flat("docs/augmenting.md")
+    assert "literal `#`, `?` and `%` characters are preserved" in _flat("docs/augmenting.md")
+
+
+def test_header_link_provenance_contract() -> None:
+    assert "`include_unverified=True`" in _flat("docs/graph-model.md")
+    assert "could not verify an include path in either direction" in _flat("docs/graph-model.md")
+    assert "does not establish that the caller lacks an include" in _flat("docs/graph-model.md")
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "calling function can rebind its parameter",
+        "function declared in an enclosing function",
+        "identifier-only initializer arguments",
+        "signature-only parameters do not introduce runtime bindings",
+        "Local-class heritage, static blocks, computed keys and field initializers",
+        "Repeated TypeScript namespace blocks share a container",
+        "splats, double splats",
+        "`from typing import overload as ...` aliases",
+    ],
+)
+def test_round5_binding_contracts(marker: str) -> None:
+    assert marker in _flat("docs/parser-coverage.md")

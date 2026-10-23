@@ -19,6 +19,7 @@ don't collide in node IDs.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from tree_sitter import Node, Parser
@@ -33,6 +34,8 @@ from trailmark.models.nodes import (
     Parameter,
     TypeRef,
 )
+from trailmark.parsers._binding_index import binding_scope
+from trailmark.parsers._bindings import guard_call
 from trailmark.parsers._common import (
     add_contains_edge,
     add_module_node,
@@ -44,6 +47,9 @@ from trailmark.parsers._common import (
     node_text,
     parse_directory,
 )
+from trailmark.parsers._declarations import callable_scope
+from trailmark.parsers._nesting import bounded_nesting
+from trailmark.parsers._walk import walk_owned
 from trailmark.parsers.c.parser import visit_c_declaration
 
 _EXTENSIONS = (".m", ".mm", ".h")
@@ -72,13 +78,16 @@ class ObjCParser:
     def __init__(self) -> None:
         self._parser = Parser(get_language("objc"))
 
+    @binding_scope
     def parse_file(self, file_path: str) -> CodeGraph:
         """Parse a single .m / .mm / .h file into a CodeGraph."""
         source = Path(file_path).read_bytes()
         tree = self._parser.parse(source)
         graph = CodeGraph(language="objc", root_path=file_path)
         module_id = module_id_from_path(file_path)
-        _visit_module(tree.root_node, file_path, module_id, graph)
+        with callable_scope(graph):
+            _visit_module(tree.root_node, file_path, module_id, graph)
+        _bind_self_messages(graph)
         return graph
 
     def parse_directory(self, dir_path: str) -> CodeGraph:
@@ -127,6 +136,7 @@ def _visit_top_level_node(
         visit_c_declaration(child, file_path, module_id, graph)
 
 
+@bounded_nesting
 def _extract_c_function(
     node: Node,
     file_path: str,
@@ -158,6 +168,7 @@ def _extract_c_function(
     )
     graph.nodes[func_id] = unit
     add_contains_edge(graph, module_id, func_id)
+    _add_blocks(body, file_path, func_id, graph)
     _add_call_edges(calls, func_id, file_path, graph)
 
 
@@ -243,7 +254,7 @@ def _extract_method_signature(
     selector = _objc_selector(node)
     if not selector:
         return
-    method_id = f"{class_id}.{selector}"
+    method_id = _method_id(node, class_id, selector)
     if method_id in graph.nodes:
         return
     params = _extract_objc_parameters(node)
@@ -260,6 +271,7 @@ def _extract_method_signature(
     add_contains_edge(graph, class_id, method_id)
 
 
+@bounded_nesting
 def _extract_method_definition(
     node: Node,
     file_path: str,
@@ -270,7 +282,7 @@ def _extract_method_definition(
     selector = _objc_selector(node)
     if not selector:
         return
-    method_id = f"{class_id}.{selector}"
+    method_id = _method_id(node, class_id, selector)
     params = _extract_objc_parameters(node)
     return_type = _extract_objc_return_type(node)
     body = first_child_by_type(node, "compound_statement")
@@ -293,6 +305,7 @@ def _extract_method_definition(
     if method_id not in graph.nodes:
         add_contains_edge(graph, class_id, method_id)
     graph.nodes[method_id] = unit
+    _add_blocks(body, file_path, method_id, graph)
     _add_call_edges(calls, method_id, file_path, graph)
 
 
@@ -421,7 +434,26 @@ def _collect_func_body(
             branches,
             exception_types,
             calls,
+            skip_types=frozenset({"block_literal"}),
         )
+        for message in walk_owned(
+            body, root_is_owner=False, boundaries=frozenset({"block_literal"})
+        ):
+            if message.type == "message_expression":
+                methods = message.children_by_field_name("method")
+                selector = (
+                    "".join(node_text(m) + ":" for m in methods)
+                    if any(c.type == ":" for c in message.children)
+                    else "".join(node_text(m) for m in methods)
+                )
+                receiver = message.child_by_field_name("receiver")
+                calls.append(
+                    (
+                        f"[{node_text(receiver) if receiver is not None else '?'} {selector}]",
+                        message,
+                    )
+                )
+        calls.sort(key=lambda call: call[1].start_byte)
     return branches, exception_types, calls
 
 
@@ -432,16 +464,33 @@ def _add_call_edges(
     graph: CodeGraph,
 ) -> None:
     for call_name, call_node in calls:
-        confidence = EdgeConfidence.CERTAIN if "." not in call_name else EdgeConfidence.INFERRED
+        message = call_node.type == "message_expression"
+        confidence = (
+            EdgeConfidence.UNCERTAIN
+            if message
+            else EdgeConfidence.CERTAIN
+            if "." not in call_name
+            else EdgeConfidence.INFERRED
+        )
         module_id = source_id.split(":", 1)[0]
         target_id = f"{module_id}:{call_name}" if call_name.isidentifier() else call_name
         graph.edges.append(
-            CodeEdge(
-                source_id=source_id,
-                target_id=target_id,
-                kind=EdgeKind.CALLS,
-                confidence=confidence,
-                location=make_location(call_node, file_path),
+            guard_call(
+                CodeEdge(
+                    source_id=source_id,
+                    target_id=target_id,
+                    kind=EdgeKind.CALLS,
+                    confidence=confidence,
+                    location=make_location(call_node, file_path),
+                    attributes=(
+                        ("binding_blocked", True),
+                        ("objc_selector", call_name.rsplit(" ", 1)[-1].removesuffix("]")),
+                    )
+                    if message
+                    else (),
+                ),
+                call_node,
+                graph=graph,
             )
         )
 
@@ -462,3 +511,73 @@ def _first_identifier_text(node: Node) -> str:
         if child.type == "identifier":
             return node_text(child)
     return ""
+
+
+def _method_id(node: Node, owner: str, selector: str) -> str:
+    # Instance selectors retain their historical IDs; class dispatch has a + prefix.
+    dispatch = "+" if any(c.type == "+" for c in node.children) else ""
+    return f"{owner}.{dispatch}{selector}"
+
+
+@bounded_nesting
+def _add_blocks(body: Node | None, file_path: str, owner: str, graph: CodeGraph) -> None:
+    if body is None:
+        return
+    for block in walk_owned(body, root_is_owner=False, boundaries=frozenset({"block_literal"})):
+        if block.type != "block_literal":
+            continue
+        name = f"$block@{block.start_point.row + 1}_{block.start_point.column}"
+        ident = f"{owner}.{name}"
+        params = []
+        parameter_list = first_child_by_type(block, "parameter_list")
+        if parameter_list is not None:
+            for parameter in parameter_list.named_children:
+                if parameter.type == "parameter_declaration":
+                    _extract_c_param(parameter, params)
+        nested_body = first_child_by_type(block, "compound_statement")
+        branches, exceptions, calls = _collect_func_body(nested_body, file_path)
+        graph.nodes[ident] = CodeUnit(
+            id=ident,
+            name=name,
+            kind=NodeKind.FUNCTION,
+            location=make_location(block, file_path),
+            parameters=tuple(params),
+            branches=tuple(branches),
+            exception_types=tuple(exceptions),
+            cyclomatic_complexity=compute_complexity(branches),
+        )
+        add_contains_edge(graph, owner, ident)
+        _add_blocks(nested_body, file_path, ident, graph)
+        _add_call_edges(calls, ident, file_path, graph)
+
+
+def _bind_self_messages(graph: CodeGraph) -> None:
+    owners = {e.target_id: e.source_id for e in graph.edges if e.kind == EdgeKind.CONTAINS}
+    methods: dict[tuple[str, str, bool], list[str]] = {}
+    for unit in graph.nodes.values():
+        if unit.kind == NodeKind.METHOD:
+            methods.setdefault((owners.get(unit.id, ""), unit.name, ".+" in unit.id), []).append(
+                unit.id
+            )
+    graph.edges[:] = [_self_message_edge(edge, owners, methods) for edge in graph.edges]
+
+
+def _self_message_edge(
+    edge: CodeEdge,
+    owners: dict[str, str],
+    methods: dict[tuple[str, str, bool], list[str]],
+) -> CodeEdge:
+    selector = dict(edge.attributes).get("objc_selector")
+    if not isinstance(selector, str) or not edge.target_id.startswith("[self "):
+        return edge
+    candidates = methods.get((owners.get(edge.source_id, ""), selector, ".+" in edge.source_id), [])
+    if len(candidates) != 1:
+        return edge
+    attributes = dict(edge.attributes)
+    attributes["binding_blocked"] = False
+    return replace(
+        edge,
+        target_id=candidates[0],
+        confidence=EdgeConfidence.INFERRED,
+        attributes=tuple(attributes.items()),
+    )

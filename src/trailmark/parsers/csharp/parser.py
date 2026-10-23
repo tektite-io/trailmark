@@ -16,6 +16,8 @@ from trailmark.models.nodes import (
     Parameter,
     TypeRef,
 )
+from trailmark.parsers._binding_index import binding_scope
+from trailmark.parsers._bindings import guard_call
 from trailmark.parsers._common import (
     add_contains_edge,
     add_module_node,
@@ -26,7 +28,14 @@ from trailmark.parsers._common import (
     node_text,
     parse_directory,
 )
-from trailmark.parsers._declarations import add_callable, add_type, callable_scope
+from trailmark.parsers._declarations import (
+    add_callable,
+    add_type,
+    bind_lexical_calls,
+    callable_scope,
+)
+from trailmark.parsers._nesting import bounded_nesting
+from trailmark.parsers._walk import owned_syntax
 
 _BRANCH_NODE_TYPES = frozenset(
     {
@@ -42,6 +51,9 @@ _BRANCH_NODE_TYPES = frozenset(
 )
 
 _THROW_TYPES = frozenset({"throw_statement", "throw_expression"})
+_NESTED_CALLABLES = frozenset(
+    {"local_function_statement", "lambda_expression", "anonymous_method_expression"}
+)
 
 _EXTENSIONS = (".cs",)
 
@@ -67,6 +79,7 @@ class CSharpParser:
     def __init__(self) -> None:
         self._parser = Parser(get_language("csharp"))
 
+    @binding_scope
     def parse_file(self, file_path: str) -> CodeGraph:
         """Parse a single C# file into a CodeGraph."""
         source = Path(file_path).read_bytes()
@@ -75,6 +88,7 @@ class CSharpParser:
         module_id = module_id_from_path(file_path)
         with callable_scope(graph):
             _visit_module(tree.root_node, file_path, module_id, graph)
+        bind_lexical_calls(graph)
         return graph
 
     def parse_directory(self, dir_path: str) -> CodeGraph:
@@ -140,13 +154,15 @@ def _create_namespace_unit(
     file_path: str,
     module_id: str,
     graph: CodeGraph,
+    container_id: str | None = None,
 ) -> str | None:
     """Create a NAMESPACE CodeUnit and its CONTAINS edge; return its id."""
     name_node = node.child_by_field_name("name")
     if name_node is None:
         return None
     ns_name = node_text(name_node)
-    ns_id = f"{module_id}:{ns_name}"
+    parent = container_id or module_id
+    ns_id = f"{parent}.{ns_name}" if container_id else f"{module_id}:{ns_name}"
     location = make_location(node, file_path)
 
     ns_unit = CodeUnit(
@@ -156,7 +172,7 @@ def _create_namespace_unit(
         location=location,
     )
     add_type(graph, ns_unit)
-    add_contains_edge(graph, module_id, ns_id)
+    add_contains_edge(graph, parent, ns_id)
     return ns_id
 
 
@@ -165,9 +181,10 @@ def _extract_namespace(
     file_path: str,
     module_id: str,
     graph: CodeGraph,
+    container_id: str | None = None,
 ) -> None:
     """Extract a block-scoped namespace declaration and its children."""
-    ns_id = _create_namespace_unit(node, file_path, module_id, graph)
+    ns_id = _create_namespace_unit(node, file_path, module_id, graph, container_id)
     if ns_id is None:
         return
     body = node.child_by_field_name("body")
@@ -188,9 +205,10 @@ def _visit_ns_child(
     if child.type in _CLASS_NODE_KINDS:
         _extract_class(child, file_path, module_id, graph, ns_id)
     elif child.type == "namespace_declaration":
-        _extract_namespace(child, file_path, module_id, graph)
+        _extract_namespace(child, file_path, module_id, graph, ns_id)
 
 
+@bounded_nesting
 def _extract_class(
     node: Node,
     file_path: str,
@@ -203,7 +221,7 @@ def _extract_class(
     if name_node is None:
         return
     class_name = node_text(name_node)
-    class_id = f"{module_id}:{class_name}"
+    class_id = f"{container_id}.{class_name}" if container_id else f"{module_id}:{class_name}"
     kind = _CLASS_NODE_KINDS.get(node.type, NodeKind.CLASS)
     location = make_location(node, file_path)
 
@@ -235,7 +253,9 @@ def _visit_class_body(
     if body is None:
         return
     for child in body.children:
-        if child.type in _FUNCTION_TYPES:
+        if child.type in _CLASS_NODE_KINDS:
+            _extract_class(child, file_path, module_id, graph, class_id)
+        elif child.type in _FUNCTION_TYPES:
             _extract_function(
                 child,
                 file_path,
@@ -291,15 +311,18 @@ def _base_type_name(node: Node) -> str:
     return ""
 
 
+@bounded_nesting
 def _extract_function(
     node: Node,
     file_path: str,
     module_id: str,
     class_id: str | None,
     graph: CodeGraph,
+    *,
+    name_override: str | None = None,
 ) -> None:
     """Extract a method or constructor declaration."""
-    func_name = _get_func_name(node, class_id)
+    func_name = name_override or _get_func_name(node, class_id)
     if not func_name:
         return
 
@@ -308,9 +331,13 @@ def _extract_function(
         module_id,
         class_id,
     )
-    params = _extract_parameters(node)
-    return_type = _extract_return_type(node)
-    body = node.child_by_field_name("body")
+    if node.type in {
+        "lambda_expression",
+        "anonymous_method_expression",
+        "local_function_statement",
+    }:
+        kind = NodeKind.FUNCTION
+    body = _callable_body(node)
     branches, exception_types, calls = _walk_body(
         body,
         file_path,
@@ -321,8 +348,8 @@ def _extract_function(
         name=func_name,
         kind=kind,
         location=make_location(node, file_path),
-        parameters=tuple(params),
-        return_type=return_type,
+        parameters=tuple(_extract_parameters(node)),
+        return_type=_extract_return_type(node),
         exception_types=tuple(exception_types),
         type_parameters=extract_type_parameters(node),
         cyclomatic_complexity=compute_complexity(branches),
@@ -332,14 +359,15 @@ def _extract_function(
     func_id = add_callable(graph, unit)
     add_contains_edge(graph, container_id, func_id)
 
-    _add_call_edges(
-        calls,
-        func_id,
-        module_id,
-        class_id,
-        file_path,
-        graph,
-    )
+    _extract_nested_functions(body, file_path, module_id, func_id, graph)
+    _add_call_edges(calls, func_id, module_id, class_id, file_path, graph)
+
+
+def _callable_body(node: Node) -> Node | None:
+    body = node.child_by_field_name("body")
+    if body is None and node.type == "anonymous_method_expression":
+        body = next((child for child in node.named_children if child.type == "block"), None)
+    return body
 
 
 def _get_func_name(node: Node, class_id: str | None) -> str:
@@ -397,18 +425,14 @@ def _visit_node(
     exception_types: list[TypeRef],
     calls: list[tuple[str, Node]],
 ) -> None:
-    """Visit body nodes in source order using an explicit work stack."""
-    stack = [node]
-    while stack:
-        current = stack.pop()
+    """Capture body sites without entering nested callable owners."""
+    types = _BRANCH_NODE_TYPES | _THROW_TYPES | {"invocation_expression"}
+    for current in owned_syntax(node, types, boundaries=_NESTED_CALLABLES):
         if current.type in _BRANCH_NODE_TYPES:
             cond = current.child_by_field_name("condition")
             cond_text = node_text(cond) if cond else current.type
             branches.append(
-                BranchInfo(
-                    location=make_location(current, file_path),
-                    condition=cond_text,
-                )
+                BranchInfo(location=make_location(current, file_path), condition=cond_text)
             )
         if current.type in _THROW_TYPES:
             _collect_throw(current, exception_types)
@@ -416,7 +440,6 @@ def _visit_node(
             call_name = _extract_call_name(current)
             if call_name:
                 calls.append((call_name, current))
-        stack.extend(reversed(current.children))
 
 
 def _extract_call_name(node: Node) -> str:
@@ -424,8 +447,11 @@ def _extract_call_name(node: Node) -> str:
     func = node.child_by_field_name("function")
     if func is None:
         return ""
-    if func.type == "identifier":
+    if func.type in {"identifier", "conditional_access_expression", "member_binding_expression"}:
         return node_text(func)
+    if func.type == "generic_name":
+        name = next((c for c in func.named_children if c.type == "identifier"), None)
+        return node_text(name) if name is not None else node_text(func)
     if func.type == "member_access_expression":
         return node_text(func)
     return ""
@@ -471,14 +497,24 @@ def _add_call_edges(
             module_id,
             class_id,
         )
-        confidence = _call_confidence(call_name)
+        conditional = "?" in call_name or call_name.startswith(".")
+        confidence = EdgeConfidence.UNCERTAIN if conditional else _call_confidence(call_name)
         graph.edges.append(
-            CodeEdge(
-                source_id=func_id,
-                target_id=target_id,
-                kind=EdgeKind.CALLS,
-                confidence=confidence,
-                location=make_location(call_node, file_path),
+            guard_call(
+                CodeEdge(
+                    source_id=func_id,
+                    target_id=target_id,
+                    kind=EdgeKind.CALLS,
+                    confidence=confidence,
+                    location=make_location(call_node, file_path),
+                    attributes=(("binding_blocked", True),)
+                    if conditional
+                    else (("bare_name", call_name),)
+                    if "." not in call_name
+                    else (),
+                ),
+                call_node,
+                graph=graph,
             )
         )
 
@@ -590,3 +626,18 @@ def _extract_import(node: Node, graph: CodeGraph) -> None:
         ns_name = parts[0].split(".")[0]
         if ns_name not in graph.dependencies:
             graph.dependencies.append(ns_name)
+
+
+def _extract_nested_functions(
+    body: Node | None, file_path: str, module_id: str, func_id: str, graph: CodeGraph
+) -> None:
+    """Extract each nested callable once, including expression-bodied lambdas."""
+    if body is not None:
+        for nested in owned_syntax(body, _NESTED_CALLABLES, boundaries=_NESTED_CALLABLES):
+            name_node = nested.child_by_field_name("name")
+            name = (
+                node_text(name_node)
+                if name_node is not None
+                else f"$lambda@{nested.start_point.row + 1}_{nested.start_point.column}"
+            )
+            _extract_function(nested, file_path, module_id, func_id, graph, name_override=name)

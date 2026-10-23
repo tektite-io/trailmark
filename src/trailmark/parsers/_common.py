@@ -11,7 +11,11 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tree_sitter import Parser
+from tree_sitter_language_pack import get_language
+
 from trailmark.analysis.proxies import ensure_proxy_nodes
+from trailmark.models.diagnostics import ParseDiagnostic
 from trailmark.models.edges import CodeEdge, EdgeConfidence, EdgeKind
 from trailmark.models.graph import CodeGraph
 from trailmark.models.nodes import (
@@ -24,6 +28,9 @@ from trailmark.models.nodes import (
     TypeRef,
 )
 from trailmark.parsers._binding import resolve_inherited_method_calls
+from trailmark.parsers._binding_index import initialize_bindings, record_unit
+from trailmark.parsers._c_headers import HeaderSources
+from trailmark.parsers._php_linking import link_php_functions
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -180,6 +187,8 @@ def parse_directory(
     language: str,
     dir_path: str,
     extensions: tuple[str, ...],
+    *,
+    link_calls: Callable[[CodeGraph], None] | None = None,
 ) -> CodeGraph:
     """Parse all matching files under dir_path into a merged graph.
 
@@ -193,22 +202,48 @@ def parse_directory(
     if sources is None or sources.root != _absolute_lexical_path(Path(dir_path)):
         owners = dict.fromkeys(walk_source_files(dir_path, extensions), language)
         with directory_sources(dir_path, owners):
-            return parse_directory(parse_file_fn, language, dir_path, extensions)
+            return parse_directory(
+                parse_file_fn, language, dir_path, extensions, link_calls=link_calls
+            )
 
     merged = CodeGraph(language=language, root_path=dir_path)
     inspected = 0
     for fpath in walk_source_files(dir_path, extensions):
         if sources.owners.get(_absolute_lexical_path(Path(fpath))) != language:
             continue
-        file_graph = parse_file_fn(fpath)
+        file_graph = _parse_with_diagnostics(parse_file_fn, fpath, language)
         merged.merge(file_graph)
         inspected += 1
     coverage_language = "c_sharp" if language == "csharp" else language
     merged.source_file_counts = {coverage_language: inspected}
     link_type_relationships(merged)
     resolve_inherited_method_calls(merged)
-    link_cross_file_calls(merged)
+    (link_calls or link_cross_file_calls)(merged)
     return merged if sources.defer_proxies else ensure_proxy_nodes(merged)
+
+
+def _parse_with_diagnostics(
+    parse_file_fn: Callable[[str], CodeGraph],
+    path: str,
+    language: str,
+) -> CodeGraph:
+    try:
+        return parse_file_fn(path)
+    except RecursionError:
+        graph = CodeGraph(language=language, root_path=path)
+        ident = module_id_from_path(path)
+        location = SourceLocation(path, 1, 1)
+        graph.nodes[ident] = CodeUnit(ident, ident, NodeKind.MODULE, location)
+        graph.parse_diagnostics.append(
+            ParseDiagnostic(
+                language,
+                language,
+                location,
+                "unsupported_syntax",
+                "File exceeds parser recursion limit; remaining files are still analyzed",
+            )
+        )
+        return graph
 
 
 def collect_body_info(
@@ -228,7 +263,7 @@ def collect_body_info(
     Uses an explicit stack instead of recursion to avoid stack overflow
     on deeply nested ASTs from untrusted source files.
     """
-    stack: list[Node] = list(reversed(body.children))
+    stack: list[Node] = [body]
     while stack:
         node = stack.pop()
         if node.type in skip_types:
@@ -326,8 +361,11 @@ def add_module_node(
     file_path: str,
     module_id: str,
     graph: CodeGraph,
+    *,
+    grammar: str | None = None,
 ) -> None:
     """Create a MODULE node and add it to the graph."""
+    initialize_bindings(root)
     module_loc = make_location(root, file_path)
     module_unit = CodeUnit(
         id=module_id,
@@ -336,6 +374,56 @@ def add_module_node(
         location=module_loc,
     )
     graph.nodes[module_id] = module_unit
+    if root.has_error and not _comments_only(root):
+        seen = set(graph.parse_diagnostics)
+        graph.parse_diagnostics.extend(
+            _syntax_diagnostics(root, file_path, graph.language, grammar, seen)
+        )
+
+
+def _comments_only(root: Node) -> bool:
+    """Recognize file-level comment trivia without walking declaration bodies."""
+    source = root.text or b""
+    cursor = 0
+    for node in root.named_children:
+        if "comment" not in node.type:
+            continue
+        start, end = node.start_byte - root.start_byte, node.end_byte - root.start_byte
+        if source[cursor:start].strip():
+            return False
+        cursor = end
+    return not source[cursor:].strip()
+
+
+def _syntax_diagnostics(
+    root: Node, path: str, language: str, grammar: str | None, seen: set[ParseDiagnostic]
+) -> Iterator[ParseDiagnostic]:
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        pending.extend(
+            reversed(
+                [
+                    child
+                    for child in node.children
+                    if child.has_error or child.is_missing or child.type == "ERROR"
+                ]
+            )
+        )
+        if node.type != "ERROR" and not node.is_missing:
+            continue
+        diagnostic = ParseDiagnostic(
+            language="c_sharp" if language == "csharp" else language,
+            grammar=grammar or language,
+            location=make_location(node, path),
+            kind="missing_syntax" if node.is_missing else "syntax_error",
+            message=f"Missing {node.type}"
+            if node.is_missing
+            else "Grammar could not parse this source range",
+        )
+        if diagnostic not in seen:
+            seen.add(diagnostic)
+            yield diagnostic
 
 
 def add_contains_edge(
@@ -344,6 +432,9 @@ def add_contains_edge(
     child_id: str,
 ) -> None:
     """Add a CONTAINS edge from container to child."""
+    unit = graph.nodes.get(child_id)
+    if unit is not None:
+        record_unit(unit)
     graph.edges.append(
         CodeEdge(
             source_id=container_id,
@@ -501,46 +592,174 @@ def first_child_by_type(node: Node, type_name: str) -> Node | None:
     return None
 
 
-def link_cross_file_calls(graph: CodeGraph, *, eligible_ids: set[str] | None = None) -> None:
+def link_cross_file_calls(
+    graph: CodeGraph,
+    *,
+    eligible_ids: set[str] | None = None,
+    included_files: Callable[[str], set[str]] | None = None,
+) -> None:
     """Infer unique free-function targets without guessing receiver semantics.
 
     Bare calls cannot safely be assigned to an unrelated class method. Existing
     exact targets are retained; overloaded and ambiguous names stay unresolved.
     A unique name across files is a heuristic, so its confidence is inferred.
     """
-    name_to_ids: dict[str, list[str]] = {}
-    for node_id, unit in graph.nodes.items():
-        if unit.kind == NodeKind.FUNCTION and (eligible_ids is None or node_id in eligible_ids):
-            name_to_ids.setdefault(unit.name, []).append(node_id)
+    if graph.language == "php":
+        link_php_functions(graph)
+        return
+    name_to_ids = _free_functions(graph, eligible_ids)
+    targets = _CrossFileTargets(graph, included_files)
     new_edges: list[CodeEdge] = []
     for edge in graph.edges:
-        if (
-            edge.kind != EdgeKind.CALLS
-            or edge.target_id in graph.nodes
-            or (eligible_ids is not None and edge.source_id not in eligible_ids)
-        ):
+        if not _needs_cross_file_target(edge, graph, eligible_ids):
             new_edges.append(edge)
             continue
-        target = edge.target_id
-        bare_name = target.rsplit(":", 1)[-1]
-        if "::" in target or "->" in target or "." in bare_name:
-            new_edges.append(edge)
-            continue
-        candidates = name_to_ids.get(bare_name, [])
+        candidates = _cross_file_candidates(edge, targets, name_to_ids)
         if len(candidates) == 1:
             edge = dataclasses.replace(
                 edge,
                 target_id=candidates[0],
-                confidence=(
-                    EdgeConfidence.UNCERTAIN
-                    if edge.confidence == EdgeConfidence.UNCERTAIN
-                    else EdgeConfidence.INFERRED
-                ),
+                confidence=EdgeConfidence.UNCERTAIN
+                if edge.confidence == EdgeConfidence.UNCERTAIN
+                else EdgeConfidence.INFERRED,
+                attributes=(*edge.attributes, ("include_unverified", True))
+                if targets.unverified(edge.source_id, candidates[0])
+                else edge.attributes,
             )
         elif candidates:
             edge = dataclasses.replace(edge, confidence=EdgeConfidence.UNCERTAIN)
         new_edges.append(edge)
     graph.edges[:] = new_edges
+
+
+def _free_functions(graph: CodeGraph, eligible_ids: set[str] | None) -> dict[str, list[str]]:
+    owners = {e.target_id: e.source_id for e in graph.edges if e.kind == EdgeKind.CONTAINS}
+    names: dict[str, list[str]] = {}
+    for node_id, unit in graph.nodes.items():
+        owner = graph.nodes.get(owners.get(node_id, ""))
+        if (
+            unit.kind == NodeKind.FUNCTION
+            and (eligible_ids is None or node_id in eligible_ids)
+            and (owner is None or owner.kind not in {NodeKind.FUNCTION, NodeKind.METHOD})
+        ):
+            names.setdefault(unit.name, []).append(node_id)
+    return names
+
+
+def _needs_cross_file_target(
+    edge: CodeEdge, graph: CodeGraph, eligible_ids: set[str] | None
+) -> bool:
+    target = edge.target_id
+    return (
+        edge.kind == EdgeKind.CALLS
+        and target not in graph.nodes
+        and edge.source_id in graph.nodes
+        and _allows_cross_file_lookup(edge, graph.language)
+        and (eligible_ids is None or edge.source_id in eligible_ids)
+        and _bare_cross_file_target(target)
+    )
+
+
+def _allows_cross_file_lookup(edge: CodeEdge, language: str) -> bool:
+    attributes = dict(edge.attributes)
+    return language != "erlang" and not any(
+        attributes.get(key) for key in ("binding_blocked", "import_binding", "circom_dependency")
+    )
+
+
+class _CrossFileTargets:
+    """Cache path and linkage metadata once for the current linking pass."""
+
+    def __init__(self, graph: CodeGraph, included_files: Callable[[str], set[str]] | None) -> None:
+        self.graph = graph
+        self.included_files = included_files
+        paths = {unit.location.file_path for unit in graph.nodes.values()}
+        resolved = {path: str(Path(path).resolve()) for path in paths}
+        self.files = {
+            node_id: resolved[unit.location.file_path] for node_id, unit in graph.nodes.items()
+        }
+        self.parents = {node_id: path.rpartition(os.sep)[0] for node_id, path in self.files.items()}
+        self.attributes = {node_id: dict(unit.attributes) for node_id, unit in graph.nodes.items()}
+        header_files = {
+            path
+            for path in resolved.values()
+            if Path(path).suffix.lower() in {".h", ".hh", ".hpp", ".hxx"}
+        }
+        self.header_statics = {
+            node_id
+            for node_id, attributes in self.attributes.items()
+            if attributes.get("internal_linkage") and self.files[node_id] in header_files
+        }
+        self.headers = getattr(included_files, "__self__", None)
+        self.externs: dict[str, set[str]] = {}
+
+    def visible(self, source: str, candidate: str) -> bool:
+        if not self.attributes[candidate].get("internal_linkage"):
+            return True
+        path = self.files[source]
+        target = self.files[candidate]
+        if ":$anonymous" in candidate or ".$anonymous" in candidate:
+            return path == target
+        if path == target or self.header_static(candidate):
+            return True
+        return self.included(source, candidate)
+
+    def header_static(self, candidate: str) -> bool:
+        return candidate in self.header_statics
+
+    def included(self, source: str, candidate: str) -> bool:
+        path, target = self.files[source], self.files[candidate]
+        if path == target:
+            return True
+        if self.included_files is None:
+            self.included_files = self.header_sources().included_files
+        return target in self.included_files(path) or path in self.included_files(target)
+
+    def header_sources(self) -> HeaderSources:
+        if not isinstance(self.headers, HeaderSources):
+            root = Path(self.graph.root_path)
+            self.headers = HeaderSources(
+                root.parent if root.is_file() else root, Parser(get_language("cpp"))
+            )
+        return self.headers
+
+    def external(self, source: str, name: str) -> bool:
+        path = self.files[source]
+        if path not in self.externs:
+            headers = self.header_sources()
+            paths = headers.included_files(path) | {path}
+            self.externs[path] = set().union(*(headers.external_declarations(p) for p in paths))
+        return name in self.externs[path]
+
+    def unverified(self, source: str, candidate: str) -> bool:
+        return self.header_static(candidate) and not self.included(source, candidate)
+
+    def prefer_included(self, source: str, name: str, candidates: list[str]) -> list[str]:
+        if not any(self.header_static(c) for c in candidates):
+            return candidates
+        verified = [c for c in candidates if not self.unverified(source, c)]
+        if verified:
+            return verified
+        return [] if self.external(source, name) else candidates
+
+
+def _cross_file_candidates(
+    edge: CodeEdge, targets: _CrossFileTargets, names: dict[str, list[str]]
+) -> list[str]:
+    source = targets.attributes.get(edge.source_id, {})
+    candidates = [
+        candidate
+        for candidate in names.get(edge.target_id.rsplit(":", 1)[-1], [])
+        if targets.visible(edge.source_id, candidate)
+    ]
+    if "go_package" in source:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if targets.parents[candidate] == targets.parents.get(edge.source_id)
+            and targets.attributes[candidate].get("go_package") == source["go_package"]
+        ]
+    return targets.prefer_included(edge.source_id, edge.target_id.rsplit(":", 1)[-1], candidates)
 
 
 def link_type_relationships(graph: CodeGraph) -> None:
@@ -590,3 +809,8 @@ def link_type_relationships(graph: CodeGraph) -> None:
                 )
         edges.append(edge)
     graph.edges[:] = edges
+
+
+def _bare_cross_file_target(target: str) -> bool:
+    """Exclude qualified receivers from free-function name matching."""
+    return "::" not in target and "->" not in target and "." not in target.rsplit(":", 1)[-1]

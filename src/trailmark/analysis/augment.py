@@ -12,6 +12,7 @@ import os
 from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
+from trailmark.analysis._sarif_uris import SarifUris
 from trailmark.models.annotations import Annotation, AnnotationKind
 from trailmark.models.graph import CodeGraph
 from trailmark.models.nodes import NodeOrigin
@@ -116,11 +117,13 @@ def augment_from_sarif(
 
     for run in sarif.get("runs", []):
         tool_name = _sarif_tool_name(run)
+        uris = SarifUris(run)
         for result in run.get("results", []):
             node_ids = _process_sarif_result(
                 result,
                 tool_name,
                 graph,
+                uris,
             )
             if node_ids:
                 matched += 1
@@ -230,20 +233,9 @@ def clear_augmented(store: GraphStore, source_prefix: str) -> None:
 # ── Path matching ────────────────────────────────────────────────────
 
 
-def _normalize_path(uri: str, root_path: str) -> str | None:
-    """Normalize a URI or file path to be relative to root_path.
-
-    Handles file:// URIs, absolute paths, and relative paths.
-    Unsupported URI schemes or incompatible drives return None. Paths outside
-    the root retain their ``..`` components for comparison with node paths.
-    """
+def _normalize_file_path(uri: str, root_path: str) -> str | None:
+    """Normalize a filesystem path without interpreting URI delimiters."""
     path = uri
-    parsed = urlparse(uri)
-    if parsed.scheme == "file":
-        path = unquote(parsed.path)
-    elif parsed.scheme and parsed.scheme != "":
-        return None
-
     if os.path.isabs(path):
         try:
             return os.path.relpath(path, root_path)
@@ -268,7 +260,7 @@ def _normalize_node_path(path: str, root_path: str) -> str | None:
                 path = absolute
         except ValueError:
             return None
-    return _normalize_path(path, root_path)
+    return _normalize_file_path(path, root_path)
 
 
 def _find_overlapping_nodes(
@@ -330,6 +322,7 @@ def _process_sarif_result(
     result: dict[str, Any],
     tool_name: str,
     graph: CodeGraph,
+    uris: SarifUris,
 ) -> set[str]:
     """Map a single SARIF result to graph nodes and annotate them.
 
@@ -342,7 +335,7 @@ def _process_sarif_result(
 
     for loc in locations:
         phys = loc.get("physicalLocation", {})
-        node_ids = _nodes_from_physical_location(phys, graph)
+        node_ids = _nodes_from_physical_location(phys, graph, uris)
         all_node_ids.update(node_ids)
 
     _annotate_nodes(graph, all_node_ids, description, source)
@@ -352,10 +345,11 @@ def _process_sarif_result(
 def _nodes_from_physical_location(
     phys: dict[str, Any],
     graph: CodeGraph,
+    uris: SarifUris,
 ) -> list[str]:
     """Resolve a SARIF physicalLocation to overlapping graph nodes."""
     artifact = phys.get("artifactLocation", {})
-    uri = artifact.get("uri", "")
+    uri = uris.resolve(artifact)
     if not uri:
         return []
 
@@ -462,7 +456,7 @@ def _nodes_from_weaudit_location(
     start_line = loc.get("startLine", 0) + 1
     end_line = loc.get("endLine", 0) + 1
 
-    rel_path = _normalize_path(path, graph.root_path)
+    rel_path = _normalize_file_path(path, graph.root_path)
     if rel_path is None:
         return []
 
@@ -500,3 +494,12 @@ def _annotate_nodes(
     ann = Annotation(kind=kind, description=description, source=source)
     for node_id in node_ids:
         graph.add_annotation(node_id, ann)
+
+
+def _normalize_path(uri: str, root: str) -> str | None:
+    """Decode SARIF paths exactly once, leaving filesystem paths literal."""
+    parsed = urlparse(uri)
+    if parsed.scheme not in {"", "file"}:
+        return None
+    path = parsed.path if parsed.scheme == "file" else uri
+    return _normalize_file_path(unquote(path), root)

@@ -22,7 +22,7 @@ install share one read-only cache.
 **`tree-sitter-sql`** provides the SQL grammar. It ships as a wheel dependency
 and does not use the language-pack cache.
 
-**Bundled grammars** for Circom, Miden Assembly, and Verus ship as C sources
+**Bundled grammars** for Circom, Miden Assembly, Move, and Verus ship as C sources
 inside Trailmark. See [below](#bundled-grammars).
 
 ### Offline and TLS-inspected networks
@@ -40,13 +40,14 @@ location on the target machine.
 
 ## Bundled grammars
 
-The bundled Circom, Miden Assembly, and Verus grammars are compiled the first
+The bundled Circom, Miden Assembly, Move, and Verus grammars are compiled the first
 time a file needs them. This requires a C compiler (`cc`), Python development
 headers, and write access to the installed grammar directories. Rust files
 without `verus!` blocks never trigger compilation.
 
 If the Verus grammar cannot be built or loaded, Trailmark logs a warning, skips
-Verus blocks, and continues parsing ordinary Rust. A compiler failure's warning
+Verus blocks, records a structured parse diagnostic, and continues parsing ordinary Rust.
+Strict parsing rejects that diagnostic. A compiler failure's warning
 includes the exit status and stderr.
 
 Compiled bindings are cached under a key derived from the compiled source
@@ -66,8 +67,9 @@ the read-only Nix store, and uses a root-owned language-pack grammar cache.
 
 ## From a git checkout
 
-A checkout keeps the Verus grammar definition and generates its C parser during
-the build with Tree-sitter CLI 0.27.1, which needs Node.js:
+A checkout keeps the Circom, Move, and Verus grammar definitions and generates
+their C parsers during the build with Tree-sitter CLI 0.27.1, which needs Node.js.
+Circom and Move use ABI 14; Verus uses ABI 15:
 
 ```bash
 npm ci                     # installs the pinned Tree-sitter CLI

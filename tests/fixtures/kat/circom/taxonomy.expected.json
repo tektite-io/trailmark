@@ -25,12 +25,18 @@
       "target": "taxonomy:Main"
     },
     {
+      "attributes": {
+        "circom_dependency": true
+      },
       "confidence": "certain",
       "kind": "calls",
       "source": "taxonomy:Main",
       "target": "taxonomy:Adder"
     },
     {
+      "attributes": {
+        "circom_dependency": true
+      },
       "confidence": "certain",
       "kind": "calls",
       "source": "taxonomy:Main",
@@ -43,6 +49,9 @@
       "target": "taxonomy:main"
     },
     {
+      "attributes": {
+        "circom_dependency": true
+      },
       "confidence": "certain",
       "kind": "calls",
       "source": "taxonomy:main",
@@ -191,6 +200,7 @@
     "languages": [
       "circom"
     ],
+    "parse_diagnostics": [],
     "proxies": 0,
     "source_file_counts": {
       "circom": 1

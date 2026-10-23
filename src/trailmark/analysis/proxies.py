@@ -6,7 +6,7 @@ import dataclasses
 import re
 from hashlib import sha256
 
-from trailmark.models.edges import CodeEdge, EdgeKind
+from trailmark.models.edges import CodeEdge, EdgeConfidence, EdgeKind
 from trailmark.models.graph import CodeGraph
 from trailmark.models.nodes import CodeUnit, NodeKind, NodeOrigin, SourceLocation, TypeRef
 
@@ -34,9 +34,62 @@ def ensure_proxy_nodes(graph: CodeGraph) -> CodeGraph:
     The function mutates and returns ``graph`` so callers can normalize a graph
     before building indexes while preserving existing call sites.
     """
+    _connect_deferred_calls(graph)
     _materialize_unresolved_calls(graph)
     materialize_type_use_edges(graph)
     return graph
+
+
+def _connect_deferred_calls(graph: CodeGraph) -> None:
+    """Expose nested callable bodies without claiming they execute eagerly."""
+    nested = _deferred_callables(graph)
+    if not nested:
+        return
+    existing = {
+        (edge.source_id, edge.target_id) for edge in graph.edges if edge.kind == EdgeKind.CALLS
+    }
+    for owner, unit in nested:
+        if (owner, unit.id) not in existing:
+            graph.edges.append(
+                CodeEdge(
+                    owner,
+                    unit.id,
+                    EdgeKind.CALLS,
+                    confidence=EdgeConfidence.UNCERTAIN,
+                    location=unit.location,
+                    attributes=(("deferred", True),),
+                )
+            )
+
+
+def _deferred_callables(graph: CodeGraph) -> list[tuple[str, CodeUnit]]:
+    owners = {
+        edge.target_id: edge.source_id for edge in graph.edges if edge.kind == EdgeKind.CONTAINS
+    }
+    callable_kinds = {NodeKind.FUNCTION, NodeKind.METHOD, NodeKind.PROCEDURE}
+    return [
+        (owner, unit)
+        for unit in graph.nodes.values()
+        if unit.kind in callable_kinds
+        and (owner := _callable_owner(unit.id, graph, owners, callable_kinds)) is not None
+    ]
+
+
+def _callable_owner(
+    node_id: str,
+    graph: CodeGraph,
+    owners: dict[str, str],
+    callable_kinds: set[NodeKind],
+) -> str | None:
+    owner = owners.get(node_id)
+    seen = set()
+    while owner is not None and owner not in seen:
+        seen.add(owner)
+        container = graph.nodes.get(owner)
+        if container is not None and container.kind in callable_kinds:
+            return owner
+        owner = owners.get(owner)
+    return None
 
 
 def _materialize_unresolved_calls(graph: CodeGraph) -> None:
@@ -48,7 +101,8 @@ def _materialize_unresolved_calls(graph: CodeGraph) -> None:
             new_edges.append(edge)
             continue
 
-        proxy_id = _proxy_id("unresolved", edge.target_id)
+        symbol = _operator_symbol(edge.target_id) if graph.language == "haskell" else edge.target_id
+        proxy_id = _proxy_id("unresolved", symbol)
         existing = staged.nodes.get(proxy_id)
         if existing is not None and not _same_proxy_identity(
             existing, edge.target_id, "unresolved"
@@ -89,7 +143,7 @@ def materialize_type_use_edges(graph: CodeGraph) -> None:
     new_edges: list[CodeEdge] = []
     for unit in graph.nodes.values():
         for type_ref in _iter_unit_types(unit):
-            target_id = _resolve_type_ref(type_ref, type_index)
+            target_id = _resolve_type_ref(type_ref, type_index, unit.id)
             if target_id is None:
                 continue
             key = (unit.id, target_id, EdgeKind.TYPE_USES)
@@ -165,7 +219,13 @@ def _type_index(graph: CodeGraph) -> dict[str, str | None]:
     for node_id, node in graph.nodes.items():
         if node.kind not in _TYPE_KINDS:
             continue
-        for key in {node_id, node.name, node_id.rsplit(":", 1)[-1], node_id.rsplit(".", 1)[-1]}:
+        for key in {
+            node_id,
+            node_id.replace(":", ".", 1),
+            node.name,
+            node_id.rsplit(":", 1)[-1],
+            node_id.rsplit(".", 1)[-1],
+        }:
             existing = index.get(key)
             if existing is None and key in index:
                 continue
@@ -179,8 +239,17 @@ def _type_index(graph: CodeGraph) -> dict[str, str | None]:
 def _resolve_type_ref(
     type_ref: TypeRef,
     type_index: dict[str, str | None],
+    owner_id: str = "",
 ) -> str | None:
     candidates = [type_ref.name]
+    if owner_id and not type_ref.module:
+        module, _, path = owner_id.partition(":")
+        parts = path.split(".")
+        local = [
+            f"{module}:{'.'.join(parts[:depth])}.{type_ref.name}"
+            for depth in range(len(parts), 0, -1)
+        ]
+        candidates = local + [f"{module}:{type_ref.name}"] + candidates
     if type_ref.module:
         candidates.insert(0, f"{type_ref.module}.{type_ref.name}")
         candidates.insert(0, f"{type_ref.module}:{type_ref.name}")
@@ -213,3 +282,27 @@ def _flatten_type_ref(type_ref: TypeRef) -> list[TypeRef]:
     for arg in type_ref.generic_args:
         refs.extend(_flatten_type_ref(arg))
     return refs
+
+
+def _operator_symbol(raw: str) -> str:
+    names = {
+        "+": "plus",
+        "-": "minus",
+        "*": "times",
+        "/": "slash",
+        "$": "apply",
+        ".": "compose",
+        "=": "equal",
+        "<": "less",
+        ">": "greater",
+        "!": "bang",
+        "&": "and",
+        "|": "or",
+        ":": "cons",
+        "^": "caret",
+        "%": "percent",
+    }
+    module, _, name = raw.partition(":")
+    if name and all(not char.isalnum() and char not in "_'" for char in name):
+        return f"{module}:$operator.{'_'.join(names.get(char, f'u{ord(char):x}') for char in name)}"
+    return raw

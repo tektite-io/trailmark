@@ -26,6 +26,8 @@ from trailmark.parsers._common import (
     node_text,
     parse_directory,
 )
+from trailmark.parsers._walk import walk_owned
+from trailmark.parsers.erlang._symbols import exported, imported, module_symbols
 
 _BRANCH_NODE_TYPES = frozenset({"cr_clause", "if_clause", "catch_clause", "receive_after"})
 
@@ -50,7 +52,8 @@ class ErlangParser:
         tree = self._parser.parse(source)
         graph = CodeGraph(language="erlang", root_path=file_path)
         module_id = module_id_from_path(file_path)
-        _visit_module(tree.root_node, file_path, module_id, graph)
+        with module_symbols(tree.root_node):
+            _visit_module(tree.root_node, file_path, module_id, graph)
         return graph
 
     def parse_directory(self, dir_path: str) -> CodeGraph:
@@ -94,7 +97,7 @@ def _visit_module(
     # Second pass: dispatch each top-level form.
     seen_funcs: dict[str, str] = {}
     for child in root.children:
-        _dispatch_form(child, file_path, module_id, specs, seen_funcs, graph)
+        _dispatch_form(child, file_path, module_id, specs, seen_funcs, graph=graph)
 
 
 def _dispatch_form(
@@ -103,11 +106,12 @@ def _dispatch_form(
     module_id: str,
     specs: dict[str, Node],
     seen_funcs: dict[str, str],
+    *,
     graph: CodeGraph,
 ) -> None:
     """Dispatch a single top-level form."""
     if child.type == "fun_decl":
-        _extract_function(child, file_path, module_id, specs, seen_funcs, graph)
+        _extract_function(child, file_path, module_id, specs, seen_funcs, graph=graph)
     elif child.type == "record_decl":
         _extract_record(child, file_path, module_id, graph)
     elif child.type == "type_alias":
@@ -127,6 +131,7 @@ def _extract_function(
     module_id: str,
     specs: dict[str, Node],
     seen_funcs: dict[str, str],
+    *,
     graph: CodeGraph,
 ) -> None:
     """Extract a function clause, merging with previous clauses."""
@@ -141,7 +146,9 @@ def _extract_function(
         _merge_function_clause(clause, file_path, seen_funcs[name], module_id, graph)
         return
 
-    _create_function_node(clause, name, file_path, module_id, specs, seen_funcs, graph)
+    _create_function_node(
+        clause, name, file_path, module_id, specs, seen_funcs=seen_funcs, graph=graph
+    )
 
 
 def _create_function_node(
@@ -150,6 +157,7 @@ def _create_function_node(
     file_path: str,
     module_id: str,
     specs: dict[str, Node],
+    *,
     seen_funcs: dict[str, str],
     graph: CodeGraph,
 ) -> None:
@@ -167,7 +175,7 @@ def _create_function_node(
 
     unit = CodeUnit(
         id=func_id,
-        name=name,
+        name=name.rsplit("/", 1)[0],
         kind=NodeKind.FUNCTION,
         location=make_location(clause, file_path),
         parameters=tuple(params),
@@ -176,11 +184,13 @@ def _create_function_node(
         cyclomatic_complexity=complexity,
         branches=tuple(branches),
         docstring=docstring,
+        attributes=(("erlang_arity", _arity(clause)), ("erlang_exported", exported(name))),
     )
     graph.nodes[func_id] = unit
     add_contains_edge(graph, module_id, func_id)
     seen_funcs[name] = func_id
 
+    _add_closures(clause, func_id, module_id, file_path, graph)
     _add_call_edges(calls, func_id, module_id, file_path, graph)
 
 
@@ -219,7 +229,9 @@ def _merge_function_clause(
         cyclomatic_complexity=compute_complexity(new_branches),
         branches=tuple(new_branches),
         docstring=existing.docstring,
+        attributes=existing.attributes,
     )
+    _add_closures(clause, func_id, module_id, file_path, graph)
     _add_call_edges(calls, func_id, module_id, file_path, graph)
 
 
@@ -229,13 +241,18 @@ def _merge_function_clause(
 def _get_spec_name(node: Node) -> str:
     """Get the function name from a -spec node."""
     fun_node = node.child_by_field_name("fun")
-    return node_text(fun_node) if fun_node is not None else ""
+    sig = next(iter(node.children_by_field_name("sigs")), None)
+    return (
+        f"{node_text(fun_node)}/{_arity(sig) if sig is not None else 0}"
+        if fun_node is not None
+        else ""
+    )
 
 
 def _get_clause_name(clause: Node) -> str:
     """Get the function name from a function_clause node."""
     name_node = clause.child_by_field_name("name")
-    return node_text(name_node) if name_node is not None else ""
+    return f"{node_text(name_node)}/{_arity(clause)}" if name_node is not None else ""
 
 
 def _get_attribute_name(node: Node) -> str:
@@ -362,6 +379,8 @@ def _walk_branches(
     branches: list[BranchInfo],
 ) -> None:
     """Recursively find branch nodes."""
+    if node.type == "anonymous_fun":
+        return
     if node.type in _BRANCH_NODE_TYPES:
         branches.append(
             BranchInfo(
@@ -405,10 +424,15 @@ def _walk_calls(
     calls: list[tuple[str, Node]],
 ) -> None:
     """Recursively find call nodes and extract targets."""
+    if node.type in {"anonymous_fun", "internal_fun", "external_fun"}:
+        return
     if node.type == "remote":
         name = _remote_call_name(node)
         if name:
             calls.append((name, node))
+        module = node.child_by_field_name("module")
+        if module is not None:
+            _walk_calls(module, calls)
         _walk_call_arguments(node.child_by_field_name("fun"), calls)
         return
 
@@ -431,7 +455,7 @@ def _walk_call_arguments(
     if node is None:
         return
     for i, child in enumerate(node.children):
-        if node.field_name_for_child(i) == "expr":
+        if node.field_name_for_child(i) == "expr" and child.type == "atom":
             continue
         _walk_calls(child, calls)
 
@@ -444,8 +468,8 @@ def _call_target_name(node: Node) -> str:
     if expr.type == "remote":
         return _remote_call_name(expr)
     if expr.type == "atom":
-        return node_text(expr)
-    return ""
+        return f"{node_text(expr)}/{_arity(node)}"
+    return f"$dynamic.{node_text(expr)}/{_arity(node)}"
 
 
 def _remote_call_name(remote: Node) -> str:
@@ -469,8 +493,9 @@ def _collect_exceptions(
     """Extract exception types from throw/error/exit calls."""
     exceptions: list[TypeRef] = []
     for name, _ in calls:
-        if name in _THROW_ATOMS:
-            exceptions.append(TypeRef(name=name))
+        bare = name.rsplit("/", 1)[0]
+        if bare in _THROW_ATOMS:
+            exceptions.append(TypeRef(name=bare))
     return exceptions
 
 
@@ -486,10 +511,11 @@ def _add_call_edges(
 ) -> None:
     """Add CALLS edges for all collected call expressions."""
     for call_name, call_node in calls:
-        if call_name in _THROW_ATOMS:
+        if call_name.rsplit("/", 1)[0] in _THROW_ATOMS:
             continue
-        target_id = _resolve_call_target(call_name, module_id)
-        confidence = _call_confidence(call_name)
+        target_id, confidence, dynamic = _erlang_call_target(
+            call_name, call_node, source_id, module_id
+        )
         graph.edges.append(
             CodeEdge(
                 source_id=source_id,
@@ -497,8 +523,45 @@ def _add_call_edges(
                 kind=EdgeKind.CALLS,
                 confidence=confidence,
                 location=make_location(call_node, file_path),
+                attributes=(("binding_blocked", True),) if dynamic else (),
             )
         )
+
+
+def _erlang_call_target(
+    call_name: str,
+    call_node: Node,
+    source_id: str,
+    module_id: str,
+) -> tuple[str, EdgeConfidence, bool]:
+    target_id = imported(call_name) or _resolve_call_target(call_name, module_id)
+    dynamic = _dynamic_call(call_name, call_node)
+    confidence = EdgeConfidence.UNCERTAIN if dynamic else _call_confidence(call_name)
+    if dynamic:
+        target_id = f"{source_id}.$dynamic.{call_name.removeprefix('$dynamic.')}"
+    closure = _called_closure(call_node, source_id)
+    if closure is not None:
+        target_id, confidence, dynamic = closure, EdgeConfidence.INFERRED, False
+    return target_id, confidence, dynamic
+
+
+def _dynamic_call(name: str, node: Node) -> bool:
+    if "$dynamic." in name:
+        return True
+    if node.type != "remote":
+        return False
+    module = node.child_by_field_name("module")
+    atom = module.child_by_field_name("module") if module is not None else None
+    return atom is None or atom.type != "atom"
+
+
+def _called_closure(node: Node, owner: str) -> str | None:
+    expression = node.child_by_field_name("expr")
+    while expression is not None and expression.type == "paren_expr":
+        expression = expression.child_by_field_name("expr")
+    if expression is not None and expression.type == "anonymous_fun":
+        return _closure_id(owner, expression)
+    return None
 
 
 def _call_confidence(call_name: str) -> EdgeConfidence:
@@ -637,3 +700,40 @@ def _children_by_field(
         if node.field_name_for_child(i) == field_name:
             result.append(child)
     return result
+
+
+def _arity(node: Node) -> int:
+    args = node.child_by_field_name("args")
+    return len(args.children_by_field_name("args")) if args is not None else 0
+
+
+def _closure_id(owner: str, node: Node) -> str:
+    clause = next(iter(node.children_by_field_name("clauses")), None)
+    arity = _arity(clause) if clause is not None else 0
+    return f"{owner}.$fun@{node.start_point.row + 1}_{node.start_point.column}/{arity}"
+
+
+def _add_closures(node: Node, owner: str, module: str, path: str, graph: CodeGraph) -> None:
+    for closure in walk_owned(node, boundaries=frozenset({"anonymous_fun"})):
+        if closure.type != "anonymous_fun":
+            continue
+        clauses = closure.children_by_field_name("clauses")
+        if not clauses:
+            continue
+        ident = _closure_id(owner, closure)
+        branches = [branch for clause in clauses for branch in _collect_branches(clause, path)]
+        calls = [call for clause in clauses for call in _collect_calls(clause)]
+        graph.nodes[ident] = CodeUnit(
+            id=ident,
+            name="<lambda>",
+            kind=NodeKind.FUNCTION,
+            location=make_location(closure, path),
+            parameters=tuple(_build_params(_extract_param_names(clauses[0]), [])),
+            branches=tuple(branches),
+            cyclomatic_complexity=compute_complexity(branches),
+            exception_types=tuple(_collect_exceptions(calls)),
+        )
+        add_contains_edge(graph, owner, ident)
+        for clause in clauses:
+            _add_closures(clause, ident, module, path, graph)
+        _add_call_edges(calls, ident, module, path, graph)

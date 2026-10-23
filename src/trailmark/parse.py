@@ -115,26 +115,31 @@ def supported_languages() -> tuple[str, ...]:
     return _SUPPORTED_LANGUAGES
 
 
-def parse_file(path: str, language: str | None = None) -> CodeGraph:
+def parse_file(path: str, language: str | None = None, *, strict: bool = False) -> CodeGraph:
     """Parse a single file into a raw ``CodeGraph``.
 
     Args:
         path: Source file to parse.
         language: Optional explicit parser language. If omitted, language is
             inferred from the file extension.
+        strict: Reject parse or unsupported-syntax diagnostics.
 
     Raises:
-        ValueError: If the language is unsupported or cannot be inferred.
+        ValueError: If the language is unsupported, cannot be inferred, or
+            strict mode finds parse diagnostics.
     """
     file_path = Path(path)
     resolved_language = _resolve_file_language(file_path, language)
     graph = _get_parser(resolved_language).parse_file(str(file_path))
     graph.source_file_counts = {resolved_language: 1}
     link_type_relationships(graph)
+    _check_diagnostics(graph, strict=strict)
     return ensure_proxy_nodes(graph)
 
 
-def parse_directory(path: str, language: str = "python", *, allow_empty: bool = False) -> CodeGraph:
+def parse_directory(
+    path: str, language: str = "python", *, allow_empty: bool = False, strict: bool = False
+) -> CodeGraph:
     """Parse a directory into a raw ``CodeGraph``.
 
     ``language`` accepts a specific language name (e.g. ``"python"``),
@@ -144,6 +149,8 @@ def parse_directory(path: str, language: str = "python", *, allow_empty: bool = 
     Raises ``ValueError`` for a missing/non-directory root or zero inspected
     source files. ``allow_empty=True`` permits the latter. Coverage is recorded
     in ``CodeGraph.source_file_counts``, including declaration-free files.
+    ``strict=True`` raises ``ValueError`` when any file has parse or
+    unsupported-syntax diagnostics.
     """
     root = Path(path)
     if not root.is_dir():
@@ -158,7 +165,17 @@ def parse_directory(path: str, language: str = "python", *, allow_empty: bool = 
             "(--allow-empty in the CLI) for an intentional empty input."
         )
         raise ValueError(msg)
+    _check_diagnostics(graph, strict=strict)
     return graph
+
+
+def _check_diagnostics(graph: CodeGraph, *, strict: bool) -> None:
+    if strict and graph.parse_diagnostics:
+        first = graph.parse_diagnostics[0]
+        raise ValueError(
+            f"Incomplete source analysis: {len(graph.parse_diagnostics)} diagnostic(s); "
+            f"{first.location.file_path}:{first.location.start_line}: {first.message}"
+        )
 
 
 def detect_languages(path: str) -> list[str]:

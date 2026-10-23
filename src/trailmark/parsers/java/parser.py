@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from tree_sitter import Node, Parser
@@ -16,6 +17,8 @@ from trailmark.models.nodes import (
     Parameter,
     TypeRef,
 )
+from trailmark.parsers._binding_index import binding_scope
+from trailmark.parsers._bindings import guard_call
 from trailmark.parsers._common import (
     add_contains_edge,
     add_module_node,
@@ -27,7 +30,14 @@ from trailmark.parsers._common import (
     node_text,
     parse_directory,
 )
-from trailmark.parsers._declarations import add_callable, add_type, callable_scope
+from trailmark.parsers._declarations import (
+    add_callable,
+    add_type,
+    bind_lexical_calls,
+    callable_scope,
+)
+from trailmark.parsers._nesting import bounded_nesting
+from trailmark.parsers._walk import walk_owned
 
 _BRANCH_NODE_TYPES = frozenset(
     {
@@ -68,6 +78,7 @@ class JavaParser:
     def __init__(self) -> None:
         self._parser = Parser(get_language("java"))
 
+    @binding_scope
     def parse_file(self, file_path: str) -> CodeGraph:
         """Parse a single Java file into a CodeGraph."""
         source = Path(file_path).read_bytes()
@@ -77,6 +88,8 @@ class JavaParser:
         with callable_scope(graph):
             _visit_module(tree.root_node, file_path, module_id, graph)
         link_type_relationships(graph)
+        bind_lexical_calls(graph)
+        _bind_constructors(graph)
         return graph
 
     def parse_directory(self, dir_path: str) -> CodeGraph:
@@ -86,6 +99,7 @@ class JavaParser:
             "java",
             dir_path,
             _EXTENSIONS,
+            link_calls=_bind_constructors,
         )
 
 
@@ -122,18 +136,21 @@ def _visit_top_level(
         _extract_import(child, graph)
 
 
+@bounded_nesting
 def _extract_class(
     node: Node,
     file_path: str,
     module_id: str,
     graph: CodeGraph,
     parent_id: str | None = None,
+    *,
+    name_override: str | None = None,
 ) -> None:
     """Extract a class, interface, or enum declaration."""
     name_node = node.child_by_field_name("name")
-    if name_node is None:
+    if name_node is None and name_override is None:
         return
-    class_name = node_text(name_node)
+    class_name = name_override or (node_text(name_node) if name_node is not None else "")
     class_id = f"{parent_id}.{class_name}" if parent_id else f"{module_id}:{class_name}"
     kind = _CLASS_NODE_KINDS.get(node.type, NodeKind.CLASS)
     location = make_location(node, file_path)
@@ -145,6 +162,7 @@ def _extract_class(
         location=location,
         type_parameters=extract_type_parameters(node),
         docstring=_extract_docstring(node),
+        attributes=(("java_servlet_base", _servlet_base(node)),),
     )
     add_type(graph, class_unit)
     add_contains_edge(graph, parent_id or module_id, class_id)
@@ -162,7 +180,9 @@ def _visit_class_body(
     graph: CodeGraph,
 ) -> None:
     """Visit children of a class body."""
-    body = node.child_by_field_name("body")
+    body = node.child_by_field_name("body") or next(
+        (c for c in node.named_children if c.type == "class_body"), None
+    )
     if body is None:
         return
     children = list(reversed(body.children))
@@ -195,7 +215,7 @@ def _extract_inheritance(
     if superclass is None:
         return
     for child in superclass.children:
-        if child.type == "type_identifier":
+        if child.type in {"type_identifier", "scoped_type_identifier", "generic_type"}:
             base_name = node_text(child)
             base_id = f"{module_id}:{base_name}"
             graph.edges.append(
@@ -243,15 +263,18 @@ def _interface_type_name(node: Node) -> str:
     return ""
 
 
+@bounded_nesting
 def _extract_function(
     node: Node,
     file_path: str,
     module_id: str,
     class_id: str | None,
     graph: CodeGraph,
+    *,
+    name_override: str | None = None,
 ) -> None:
     """Extract a method or constructor declaration."""
-    func_name = _get_func_name(node)
+    func_name = name_override or _get_func_name(node)
     if not func_name:
         return
 
@@ -260,37 +283,21 @@ def _extract_function(
         module_id,
         class_id,
     )
-    params = _extract_parameters(node)
-    return_type = _extract_return_type(node)
+    if node.type == "lambda_expression":
+        kind = NodeKind.FUNCTION
+    unit, calls = _function_unit(node, file_path, func_id=func_id, func_name=func_name, kind=kind)
     body = node.child_by_field_name("body")
-    branches, exception_types, calls = _walk_body(
-        body,
-        file_path,
-    )
-
-    unit = CodeUnit(
-        id=func_id,
-        name=func_name,
-        kind=kind,
-        location=make_location(node, file_path),
-        parameters=tuple(params),
-        return_type=return_type,
-        exception_types=tuple(exception_types),
-        type_parameters=extract_type_parameters(node),
-        cyclomatic_complexity=compute_complexity(branches),
-        branches=tuple(branches),
-        docstring=_extract_docstring(node),
-    )
     func_id = add_callable(graph, unit)
     add_contains_edge(graph, container_id, func_id)
 
+    _extract_nested_callables(body, file_path, module_id, func_id, graph)
     _add_call_edges(
         calls,
         func_id,
         module_id,
         class_id,
-        file_path,
-        graph,
+        file_path=file_path,
+        graph=graph,
     )
 
 
@@ -348,6 +355,8 @@ def _visit_node(
     calls: list[tuple[str, Node]],
 ) -> None:
     """Recursively visit a node, collecting body info."""
+    if node.type in {"lambda_expression", "class_declaration", "class_body"}:
+        return
     if node.type in _BRANCH_NODE_TYPES:
         cond = node.child_by_field_name("condition")
         cond_text = node_text(cond) if cond else node.type
@@ -366,6 +375,10 @@ def _visit_node(
         if call_name:
             calls.append((call_name, node))
 
+    if node.type in {"object_creation_expression", "explicit_constructor_invocation"}:
+        target = node.child_by_field_name("type") or node.child_by_field_name("constructor")
+        if target is not None:
+            calls.append((node_text(target), node))
     for child in node.children:
         _visit_node(
             child,
@@ -428,6 +441,7 @@ def _add_call_edges(
     func_id: str,
     module_id: str,
     class_id: str | None,
+    *,
     file_path: str,
     graph: CodeGraph,
 ) -> None:
@@ -438,14 +452,29 @@ def _add_call_edges(
             module_id,
             class_id,
         )
-        confidence = _call_confidence(call_name)
+        construction = call_node.type in {
+            "object_creation_expression",
+            "explicit_constructor_invocation",
+        }
+        if construction:
+            target_id = f"{func_id}.$constructor.{call_name}"
+        confidence = EdgeConfidence.UNCERTAIN if construction else _call_confidence(call_name)
         graph.edges.append(
-            CodeEdge(
-                source_id=func_id,
-                target_id=target_id,
-                kind=EdgeKind.CALLS,
-                confidence=confidence,
-                location=make_location(call_node, file_path),
+            guard_call(
+                CodeEdge(
+                    source_id=func_id,
+                    target_id=target_id,
+                    kind=EdgeKind.CALLS,
+                    confidence=confidence,
+                    location=make_location(call_node, file_path),
+                    attributes=(("binding_blocked", True), ("constructor_type", call_name))
+                    if construction
+                    else (("bare_name", call_name),)
+                    if "." not in call_name
+                    else (),
+                ),
+                call_node,
+                graph=graph,
             )
         )
 
@@ -562,3 +591,167 @@ def _extract_import(node: Node, graph: CodeGraph) -> None:
         pkg_name = full_path.split(".")[0]
         if pkg_name not in graph.dependencies:
             graph.dependencies.append(pkg_name)
+
+
+def _servlet_base(node: Node) -> bool:
+    superclass = node.child_by_field_name("superclass")
+    raw = node_text(superclass).removeprefix("extends").strip() if superclass is not None else ""
+    qualified = {"javax.servlet.http.HttpServlet", "jakarta.servlet.http.HttpServlet"}
+    if raw in qualified:
+        return True
+    root = node
+    while root.parent is not None:
+        root = root.parent
+    imports = {
+        node_text(c).removeprefix("import").strip().removesuffix(";")
+        for c in root.named_children
+        if c.type == "import_declaration"
+    }
+    return raw == "HttpServlet" and bool(
+        imports & (qualified | {"javax.servlet.http.*", "jakarta.servlet.http.*"})
+    )
+
+
+def _bind_constructors(graph: CodeGraph) -> None:
+    owners = {e.target_id: e.source_id for e in graph.edges if e.kind == EdgeKind.CONTAINS}
+    bases = {e.source_id: e.target_id for e in graph.edges if e.kind == EdgeKind.INHERITS}
+    types: dict[str, list[str]] = {}
+    constructors: dict[str, list[str]] = {}
+    for unit in graph.nodes.values():
+        if unit.kind == NodeKind.CLASS:
+            types.setdefault(unit.name, []).append(unit.id)
+        _index_constructor(unit, graph, owners, constructors)
+    graph.edges[:] = [_constructor_edge(e, owners, bases, types, constructors) for e in graph.edges]
+
+
+def _index_constructor(
+    unit: CodeUnit,
+    graph: CodeGraph,
+    owners: dict[str, str],
+    constructors: dict[str, list[str]],
+) -> None:
+    owner = graph.nodes.get(owners.get(unit.id, ""))
+    if unit.kind == NodeKind.METHOD and owner is not None and unit.name == owner.name:
+        constructors.setdefault(owner.id, []).append(unit.id)
+
+
+def _constructor_edge(
+    edge: CodeEdge,
+    owners: dict[str, str],
+    bases: dict[str, str],
+    types: dict[str, list[str]],
+    constructors: dict[str, list[str]],
+) -> CodeEdge:
+    name = dict(edge.attributes).get("constructor_type")
+    if not isinstance(name, str):
+        return edge
+    owner = owners.get(edge.source_id, "")
+    candidates = _constructor_types(name, owner, bases, types)
+    targets = constructors.get(candidates[0], []) if len(candidates) == 1 else []
+    if len(targets) == 1:
+        return replace(
+            edge,
+            target_id=targets[0],
+            confidence=EdgeConfidence.INFERRED,
+            attributes=tuple((k, v) for k, v in edge.attributes if k != "binding_blocked"),
+        )
+    return (
+        replace(edge, target_id=f"{edge.source_id}.$constructor.{name}")
+        if name in {"this", "super"}
+        else edge
+    )
+
+
+def _constructor_types(
+    name: str,
+    owner: str,
+    bases: dict[str, str],
+    types: dict[str, list[str]],
+) -> list[str]:
+    if name == "this":
+        return [owner]
+    if name == "super":
+        return [bases[owner]] if owner in bases else []
+    return types.get(name, [])
+
+
+def _extract_nested_callables(
+    body: Node | None, file_path: str, module_id: str, func_id: str, graph: CodeGraph
+) -> None:
+    if body is not None:
+        for nested in walk_owned(
+            body,
+            root_is_owner=False,
+            boundaries=frozenset({"lambda_expression", "class_declaration", "class_body"}),
+        ):
+            if nested.type == "lambda_expression":
+                _extract_function(
+                    nested,
+                    file_path,
+                    module_id,
+                    func_id,
+                    graph,
+                    name_override=(
+                        f"$lambda@{nested.start_point.row + 1}_{nested.start_point.column}"
+                    ),
+                )
+            elif nested.type == "class_declaration":
+                _extract_class(nested, file_path, module_id, graph, func_id)
+            elif (
+                nested.type == "class_body"
+                and nested.parent is not None
+                and nested.parent.type == "object_creation_expression"
+            ):
+                _extract_class(
+                    nested.parent,
+                    file_path,
+                    module_id,
+                    graph,
+                    func_id,
+                    name_override=(
+                        f"$anonymous@{nested.start_point.row + 1}_{nested.start_point.column}"
+                    ),
+                )
+
+
+def _function_unit(
+    node: Node, file_path: str, *, func_id: str, func_name: str, kind: NodeKind
+) -> tuple[CodeUnit, list[tuple[str, Node]]]:
+    params = _extract_parameters(node)
+    return_type = _extract_return_type(node)
+    body = node.child_by_field_name("body")
+    branches, exception_types, calls = _walk_body(
+        body,
+        file_path,
+    )
+
+    unit = CodeUnit(
+        id=func_id,
+        name=func_name,
+        kind=kind,
+        location=make_location(node, file_path),
+        parameters=tuple(params),
+        return_type=return_type,
+        exception_types=tuple(exception_types),
+        type_parameters=extract_type_parameters(node),
+        cyclomatic_complexity=compute_complexity(branches),
+        branches=tuple(branches),
+        docstring=_extract_docstring(node),
+        attributes=(
+            (
+                "java_private",
+                any(
+                    c.type == "modifiers" and "private" in node_text(c).split()
+                    for c in node.named_children
+                ),
+            ),
+            (
+                "java_static",
+                any(
+                    c.type == "modifiers" and "static" in node_text(c).split()
+                    for c in node.named_children
+                ),
+            ),
+        ),
+    )
+    return unit, calls

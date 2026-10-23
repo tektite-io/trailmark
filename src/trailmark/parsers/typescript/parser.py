@@ -10,22 +10,28 @@ from tree_sitter_language_pack import get_language
 from trailmark.models.edges import CodeEdge, EdgeConfidence, EdgeKind
 from trailmark.models.graph import CodeGraph
 from trailmark.models.nodes import (
-    BranchInfo,
     CodeUnit,
     NodeKind,
     Parameter,
     TypeRef,
 )
+from trailmark.parsers._binding_index import binding_scope, initialize_bindings
 from trailmark.parsers._common import (
     add_contains_edge,
     add_module_node,
-    collect_body_info,
     compute_complexity,
     extract_type_parameters,
     make_location,
     module_id_from_path,
     node_text,
     parse_directory,
+)
+from trailmark.parsers._declarations import add_callable, callable_scope
+from trailmark.parsers._ecmascript import (
+    body_info,
+    class_member_callable,
+    declared_name,
+    discover_callables,
 )
 
 _BRANCH_NODE_TYPES = frozenset(
@@ -47,7 +53,9 @@ _FUNCTION_DECL_TYPES = frozenset({"function_declaration", "generator_function_de
 
 _FUNCTION_EXPR_TYPES = frozenset({"arrow_function", "function", "function_expression"})
 _FUNCTION_SCOPE_TYPES = (
-    _FUNCTION_DECL_TYPES | _FUNCTION_EXPR_TYPES | frozenset({"method_definition"})
+    _FUNCTION_DECL_TYPES
+    | _FUNCTION_EXPR_TYPES
+    | frozenset({"method_definition", "class", "class_declaration", "abstract_class_declaration"})
 )
 
 _EXTENSIONS = (".ts", ".tsx")
@@ -62,14 +70,19 @@ class TypeScriptParser:
 
     def __init__(self) -> None:
         self._parser = Parser(get_language("typescript"))
+        self._tsx_parser = Parser(get_language("tsx"))
 
+    @binding_scope
     def parse_file(self, file_path: str) -> CodeGraph:
         """Parse a single TypeScript file into a CodeGraph."""
         source = Path(file_path).read_bytes()
-        tree = self._parser.parse(source)
+        parser = self._tsx_parser if Path(file_path).suffix.lower() == ".tsx" else self._parser
+        tree = parser.parse(source)
+        initialize_bindings(tree.root_node, language=parser.language)
         graph = CodeGraph(language="typescript", root_path=file_path)
         module_id = module_id_from_path(file_path)
-        _visit_module(tree.root_node, file_path, module_id, graph)
+        with callable_scope(graph):
+            _visit_module(tree.root_node, file_path, module_id, graph)
         return graph
 
     def parse_directory(self, dir_path: str) -> CodeGraph:
@@ -89,9 +102,31 @@ def _visit_module(
     graph: CodeGraph,
 ) -> None:
     """Walk the top-level of a module, extracting nodes and edges."""
-    add_module_node(root, file_path, module_id, graph)
+    add_module_node(
+        root,
+        file_path,
+        module_id,
+        graph,
+        grammar="tsx" if Path(file_path).suffix.lower() == ".tsx" else "typescript",
+    )
     for child in root.children:
         _visit_top_level_node(child, file_path, module_id, graph)
+    discover_callables(
+        root,
+        file_path,
+        module_id,
+        graph,
+        lambda node, name, owner, class_owner: _extract_function(
+            node,
+            file_path,
+            module_id,
+            class_owner if node.type in {"arrow_function", "method_definition"} else None,
+            graph,
+            name_override=name,
+            owner_id=owner,
+            is_method=class_member_callable(node, class_owner),
+        ),
+    )
 
 
 def _visit_top_level_node(
@@ -103,23 +138,28 @@ def _visit_top_level_node(
     """Dispatch a single top-level node."""
     if child.type in _FUNCTION_DECL_TYPES:
         _extract_function(child, file_path, module_id, None, graph)
-    elif child.type == "class_declaration":
+    elif child.type in {"class_declaration", "abstract_class_declaration"}:
         _extract_class(child, file_path, module_id, graph)
-    elif child.type == "interface_declaration":
-        _extract_interface(child, file_path, module_id, graph)
-    elif child.type == "enum_declaration":
-        _extract_enum(child, file_path, module_id, graph)
-    elif child.type == "import_statement":
-        _extract_import(child, graph)
-    elif child.type == "export_statement":
-        _visit_export(child, file_path, module_id, graph)
-    elif child.type in (
-        "lexical_declaration",
-        "variable_declaration",
-    ):
-        _visit_lexical_decl(child, file_path, module_id, graph)
-    elif child.type == "expression_statement":
-        _visit_expression_stmt(child, file_path, module_id, graph)
+    else:
+        visitors = {
+            "interface_declaration": _extract_interface,
+            "enum_declaration": _extract_enum,
+            "import_statement": _extract_import_statement,
+            "export_statement": _visit_export,
+            "lexical_declaration": _visit_lexical_decl,
+            "variable_declaration": _visit_lexical_decl,
+            "expression_statement": _visit_expression_stmt,
+        }
+        visitor = visitors.get(child.type)
+        if visitor is not None:
+            visitor(child, file_path, module_id, graph)
+
+
+def _extract_import_statement(
+    child: Node, file_path: str, module_id: str, graph: CodeGraph
+) -> None:
+    """Adapt import metadata extraction to the top-level visitor signature."""
+    _extract_import(child, graph)
 
 
 def _visit_export(
@@ -219,43 +259,14 @@ def _extract_function_expr(
     """Extract a function expression assigned to a named variable."""
     func_name = node_text(name_node)
     func_id = f"{module_id}:{func_name}"
-    params = _extract_parameters(func_node)
-    return_type = _extract_return_type(func_node)
-    body = func_node.child_by_field_name("body")
-
-    branches: list[BranchInfo] = []
-    exception_types: list[TypeRef] = []
-    calls: list[tuple[str, Node]] = []
-
-    if body is not None:
-        collect_body_info(
-            body,
-            file_path,
-            _BRANCH_NODE_TYPES,
-            "call_expression",
-            _THROW_TYPES,
-            branches,
-            exception_types,
-            calls,
-        )
-
-    complexity = compute_complexity(branches)
-    location = make_location(func_node, file_path)
-
-    unit = CodeUnit(
-        id=func_id,
-        name=func_name,
+    unit, calls = _function_unit(
+        func_node,
+        file_path,
+        func_id=func_id,
+        func_name=func_name,
         kind=NodeKind.FUNCTION,
-        location=location,
-        parameters=tuple(params),
-        return_type=return_type,
-        type_parameters=extract_type_parameters(func_node),
-        cyclomatic_complexity=complexity,
-        branches=tuple(branches),
-        exception_types=tuple(exception_types),
-        docstring=_extract_jsdoc(func_node),
     )
-    graph.nodes[func_id] = unit
+    func_id = add_callable(graph, unit)
     add_contains_edge(graph, module_id, func_id)
 
     _add_call_edges(
@@ -263,8 +274,8 @@ def _extract_function_expr(
         func_id,
         module_id,
         None,
-        file_path,
-        graph,
+        file_path=file_path,
+        graph=graph,
     )
 
 
@@ -504,6 +515,10 @@ def _extract_interface_member(
         name=member_name,
         kind=NodeKind.METHOD,
         location=location,
+        parameters=tuple(_extract_parameters(node)),
+        return_type=_extract_return_type(node),
+        type_parameters=extract_type_parameters(node),
+        attributes=(("declaration_only", True),),
     )
     graph.nodes[member_id] = member_unit
     add_contains_edge(graph, iface_id, member_id)
@@ -547,41 +562,12 @@ def _extract_method(
     method_name = node_text(name_node)
     method_id = f"{class_id}.{method_name}"
 
-    params = _extract_parameters(node)
-    return_type = _extract_return_type(node)
-    body = node.child_by_field_name("body")
-
-    branches: list[BranchInfo] = []
-    exception_types: list[TypeRef] = []
-    calls: list[tuple[str, Node]] = []
-
-    if body is not None:
-        collect_body_info(
-            body,
-            file_path,
-            _BRANCH_NODE_TYPES,
-            "call_expression",
-            _THROW_TYPES,
-            branches,
-            exception_types,
-            calls,
-        )
-
-    complexity = compute_complexity(branches)
-    location = make_location(node, file_path)
-
-    unit = CodeUnit(
-        id=method_id,
-        name=method_name,
+    unit, calls = _function_unit(
+        node,
+        file_path,
+        func_id=method_id,
+        func_name=method_name,
         kind=NodeKind.METHOD,
-        location=location,
-        parameters=tuple(params),
-        return_type=return_type,
-        type_parameters=extract_type_parameters(node),
-        cyclomatic_complexity=complexity,
-        branches=tuple(branches),
-        exception_types=tuple(exception_types),
-        docstring=_extract_jsdoc(node),
     )
     graph.nodes[method_id] = unit
     add_contains_edge(graph, class_id, method_id)
@@ -591,8 +577,8 @@ def _extract_method(
         method_id,
         module_id,
         class_id,
-        file_path,
-        graph,
+        file_path=file_path,
+        graph=graph,
     )
 
 
@@ -602,14 +588,21 @@ def _extract_function(
     module_id: str,
     class_id: str | None,
     graph: CodeGraph,
-) -> None:
+    *,
+    name_override: str | None = None,
+    owner_id: str | None = None,
+    is_method: bool = False,
+) -> str | None:
     """Extract a function or generator function declaration."""
-    name_node = node.child_by_field_name("name")
-    if name_node is None:
-        return
-    func_name = node_text(name_node)
+    func_name = declared_name(node, name_override)
+    if func_name is None:
+        return None
 
-    if class_id is not None:
+    if owner_id is not None:
+        func_id = f"{owner_id}.{func_name}" if owner_id != module_id else f"{module_id}:{func_name}"
+        kind = NodeKind.METHOD if is_method else NodeKind.FUNCTION
+        container_id = owner_id
+    elif class_id is not None:
         func_id = f"{class_id}.{func_name}"
         kind = NodeKind.METHOD
         container_id = class_id
@@ -618,25 +611,40 @@ def _extract_function(
         kind = NodeKind.FUNCTION
         container_id = module_id
 
+    unit, calls = _function_unit(node, file_path, func_id=func_id, func_name=func_name, kind=kind)
+    func_id = add_callable(graph, unit)
+    add_contains_edge(graph, container_id, func_id)
+
+    _add_call_edges(
+        calls,
+        func_id,
+        module_id,
+        class_id,
+        file_path=file_path,
+        graph=graph,
+    )
+    return func_id
+
+
+def _function_unit(
+    node: Node,
+    file_path: str,
+    *,
+    func_id: str,
+    func_name: str,
+    kind: NodeKind,
+) -> tuple[CodeUnit, list[tuple[str, Node]]]:
     params = _extract_parameters(node)
     return_type = _extract_return_type(node)
     body = node.child_by_field_name("body")
 
-    branches: list[BranchInfo] = []
-    exception_types: list[TypeRef] = []
-    calls: list[tuple[str, Node]] = []
-
-    if body is not None:
-        collect_body_info(
-            body,
-            file_path,
-            _BRANCH_NODE_TYPES,
-            "call_expression",
-            _THROW_TYPES,
-            branches,
-            exception_types,
-            calls,
-        )
+    branches, exception_types, calls = body_info(
+        body,
+        file_path,
+        branch_types=_BRANCH_NODE_TYPES,
+        throw_types=_THROW_TYPES,
+        boundaries=_FUNCTION_SCOPE_TYPES,
+    )
 
     complexity = compute_complexity(branches)
     location = make_location(node, file_path)
@@ -654,17 +662,7 @@ def _extract_function(
         exception_types=tuple(exception_types),
         docstring=_extract_jsdoc(node),
     )
-    graph.nodes[func_id] = unit
-    add_contains_edge(graph, container_id, func_id)
-
-    _add_call_edges(
-        calls,
-        func_id,
-        module_id,
-        class_id,
-        file_path,
-        graph,
-    )
+    return unit, calls
 
 
 def _extract_parameters(node: Node) -> list[Parameter]:
@@ -833,6 +831,7 @@ def _add_call_edges(
     source_id: str,
     module_id: str,
     class_id: str | None,
+    *,
     file_path: str,
     graph: CodeGraph,
 ) -> None:
@@ -882,16 +881,49 @@ def _nearest_function_scope(node: Node) -> Node | None:
 
 
 def _latest_receiver_assignment(scope: Node, call_node: Node, receiver: str) -> str | None:
-    latest: tuple[int, str] | None = None
+    latest: str | None = None
+    ancestors: set[Node] = set()
+    current = call_node.parent
+    while current is not None:
+        ancestors.add(current)
+        current = current.parent
     for node in _walk_nodes(scope):
         if node.start_byte >= call_node.start_byte:
             continue
         if _nearest_function_scope(node) != scope:
             continue
-        concrete_class = _receiver_assignment_class(node, receiver)
-        if concrete_class is not None:
-            latest = (node.start_byte, concrete_class)
-    return latest[1] if latest is not None else None
+        field = {"variable_declarator": "name", "assignment_expression": "left"}.get(node.type)
+        assigned = node.child_by_field_name(field) if field is not None else None
+        if assigned is None or node_text(assigned) != receiver:
+            continue
+        parent = node.parent
+        conditional = False
+        visible = True
+        while parent is not None and parent != scope:
+            if (
+                node.type == "variable_declarator"
+                and parent.type == "statement_block"
+                and parent not in ancestors
+            ):
+                visible = False
+                break
+            if (
+                parent.type
+                in {
+                    "if_statement",
+                    "switch_case",
+                    "for_statement",
+                    "while_statement",
+                    "ternary_expression",
+                    "catch_clause",
+                }
+                and parent not in ancestors
+            ):
+                conditional = True
+            parent = parent.parent
+        if visible:
+            latest = None if conditional else _receiver_assignment_class(node, receiver)
+    return latest
 
 
 def _receiver_assignment_class(node: Node, receiver: str) -> str | None:

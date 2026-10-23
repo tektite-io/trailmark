@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from pathlib import Path
 
 from tree_sitter import Node, Parser
@@ -25,6 +26,9 @@ from trailmark.parsers._common import (
     node_text,
     parse_directory,
 )
+from trailmark.parsers._nesting import bounded_nesting
+from trailmark.parsers._php_linking import link_php_functions
+from trailmark.parsers._walk import walk_owned
 
 _BRANCH_NODE_TYPES = frozenset(
     {
@@ -40,9 +44,21 @@ _BRANCH_NODE_TYPES = frozenset(
 
 _THROW_TYPES = frozenset({"throw_expression"})
 
-_CALL_TYPES = frozenset({"function_call_expression", "member_call_expression"})
+_CALL_TYPES = frozenset(
+    {
+        "function_call_expression",
+        "member_call_expression",
+        "nullsafe_member_call_expression",
+        "scoped_call_expression",
+    }
+)
+_CALLABLE_TYPES = frozenset(
+    {"function_definition", "anonymous_function", "arrow_function", "class_declaration"}
+)
 
 _EXTENSIONS = (".php",)
+
+_NAMESPACE: ContextVar[str] = ContextVar("_PHP_NAMESPACE", default="")
 
 _CLASS_LIKE_TYPES = frozenset({"class_declaration", "interface_declaration", "trait_declaration"})
 
@@ -70,6 +86,7 @@ class PHPParser:
         graph = CodeGraph(language="php", root_path=file_path)
         module_id = module_id_from_path(file_path)
         _visit_module(tree.root_node, file_path, module_id, graph)
+        link_php_functions(graph)
         return graph
 
     def parse_directory(self, dir_path: str) -> CodeGraph:
@@ -100,30 +117,55 @@ def _walk_children(
     graph: CodeGraph,
 ) -> None:
     """Recursively walk children to find top-level definitions."""
+    namespace = _NAMESPACE.get()
     for child in node.children:
-        if child.type == "program":
-            _walk_children(child, file_path, module_id, graph)
-        elif child.type == "namespace_definition":
-            _extract_namespace(
-                child,
-                file_path,
-                module_id,
-                graph,
-            )
-        elif child.type in _CLASS_LIKE_TYPES:
-            _extract_class(child, file_path, module_id, graph)
-        elif child.type == "function_definition":
-            _extract_function(
-                child,
-                file_path,
-                module_id,
-                None,
-                graph,
-            )
-        elif child.type == "namespace_use_declaration":
-            _extract_import(child, graph)
+        if child.type == "namespace_definition":
+            name = child.child_by_field_name("name")
+            current = node_text(name) if name is not None else ""
+            if child.child_by_field_name("body") is None:
+                namespace = current
         else:
-            _walk_children(child, file_path, module_id, graph)
+            current = namespace
+        token = _NAMESPACE.set(current)
+        try:
+            _visit_statement(child, file_path, module_id, graph)
+        finally:
+            _NAMESPACE.reset(token)
+
+
+def _visit_statement(child: Node, file_path: str, module_id: str, graph: CodeGraph) -> None:
+    if child.type == "program":
+        _walk_children(child, file_path, module_id, graph)
+    elif child.type == "namespace_definition":
+        _extract_namespace(
+            child,
+            file_path,
+            module_id,
+            graph,
+        )
+    elif child.type in _CLASS_LIKE_TYPES:
+        _extract_class(child, file_path, module_id, graph)
+    elif child.type == "function_definition":
+        _extract_function(
+            child,
+            file_path,
+            module_id,
+            None,
+            graph,
+        )
+    elif child.type in {"anonymous_function", "arrow_function"}:
+        _extract_function(
+            child,
+            file_path,
+            module_id,
+            None,
+            graph,
+            name_override=f"$lambda@{child.start_point.row + 1}_{child.start_point.column}",
+        )
+    elif child.type == "namespace_use_declaration":
+        _extract_import(child, graph)
+    else:
+        _walk_children(child, file_path, module_id, graph)
 
 
 def _extract_namespace(
@@ -134,10 +176,8 @@ def _extract_namespace(
 ) -> None:
     """Extract a namespace definition node."""
     name_node = node.child_by_field_name("name")
-    if name_node is None:
-        return
-    ns_name = node_text(name_node)
-    ns_id = f"{module_id}:{ns_name}"
+    ns_name = node_text(name_node) if name_node is not None else ""
+    ns_id = f"{module_id}:{ns_name.replace(chr(92), '.')}"
     location = make_location(node, file_path)
 
     ns_unit = CodeUnit(
@@ -146,14 +186,16 @@ def _extract_namespace(
         kind=NodeKind.NAMESPACE,
         location=location,
     )
-    graph.nodes[ns_id] = ns_unit
-    add_contains_edge(graph, module_id, ns_id)
+    if ns_name:
+        graph.nodes[ns_id] = ns_unit
+        add_contains_edge(graph, module_id, ns_id)
 
     body = node.child_by_field_name("body")
     if body is not None:
         _walk_children(body, file_path, module_id, graph)
 
 
+@bounded_nesting
 def _extract_class(
     node: Node,
     file_path: str,
@@ -165,7 +207,7 @@ def _extract_class(
     if name_node is None:
         return
     class_name = node_text(name_node)
-    class_id = f"{module_id}:{class_name}"
+    class_id = _php_reference_id(node, module_id, class_name)
     kind = _NODE_KIND_MAP.get(node.type, NodeKind.CLASS)
     location = make_location(node, file_path)
 
@@ -177,7 +219,7 @@ def _extract_class(
         docstring=_extract_docstring(node),
     )
     graph.nodes[class_id] = class_unit
-    add_contains_edge(graph, module_id, class_id)
+    add_contains_edge(graph, _namespace_owner(node, module_id), class_id)
 
     _extract_inheritance(node, class_id, module_id, graph)
     _extract_implements(node, class_id, module_id, graph)
@@ -196,7 +238,7 @@ def _extract_inheritance(
             for name_child in child.children:
                 if name_child.type == "name":
                     base_name = node_text(name_child)
-                    base_id = f"{module_id}:{base_name}"
+                    base_id = _php_reference_id(node, module_id, base_name)
                     graph.edges.append(
                         CodeEdge(
                             source_id=class_id,
@@ -219,7 +261,7 @@ def _extract_implements(
             for name_child in child.children:
                 if name_child.type == "name":
                     iface_name = node_text(name_child)
-                    iface_id = f"{module_id}:{iface_name}"
+                    iface_id = _php_reference_id(node, module_id, iface_name)
                     graph.edges.append(
                         CodeEdge(
                             source_id=class_id,
@@ -252,28 +294,61 @@ def _visit_class_body(
             )
 
 
+@bounded_nesting
 def _extract_function(
     node: Node,
     file_path: str,
     module_id: str,
     class_id: str | None,
     graph: CodeGraph,
+    *,
+    name_override: str | None = None,
+    owner_id: str | None = None,
 ) -> None:
     """Extract a function or method definition."""
     name_node = node.child_by_field_name("name")
-    if name_node is None:
+    if name_node is None and name_override is None:
         return
-    func_name = node_text(name_node)
+    func_name = name_override or (node_text(name_node) if name_node is not None else "")
 
-    if class_id is not None:
+    if owner_id is not None:
+        func_id = f"{owner_id}.{func_name}"
+        kind = NodeKind.FUNCTION
+        container_id = owner_id
+    elif class_id is not None:
         func_id = f"{class_id}.{func_name}"
         kind = NodeKind.METHOD
         container_id = class_id
     else:
-        func_id = f"{module_id}:{func_name}"
+        func_id = _php_reference_id(node, module_id, func_name)
         kind = NodeKind.FUNCTION
-        container_id = module_id
+        container_id = _namespace_owner(node, module_id)
 
+    unit, calls, body = _function_unit(
+        node, file_path, func_id=func_id, func_name=func_name, kind=kind
+    )
+    graph.nodes[func_id] = unit
+    add_contains_edge(graph, container_id, func_id)
+    _nested_functions(body, file_path, module_id, func_id, graph, class_id=class_id)
+
+    _add_call_edges(
+        calls,
+        func_id,
+        module_id,
+        class_id,
+        file_path=file_path,
+        graph=graph,
+    )
+
+
+def _function_unit(
+    node: Node,
+    file_path: str,
+    *,
+    func_id: str,
+    func_name: str,
+    kind: NodeKind,
+) -> tuple[CodeUnit, list[tuple[str, Node]], Node | None]:
     params = _extract_parameters(node)
     return_type = _extract_return_type(node)
     body = node.child_by_field_name("body")
@@ -306,17 +381,33 @@ def _extract_function(
         branches=tuple(branches),
         docstring=_extract_docstring(node),
     )
-    graph.nodes[func_id] = unit
-    add_contains_edge(graph, container_id, func_id)
+    return unit, calls, body
 
-    _add_call_edges(
-        calls,
-        func_id,
-        module_id,
-        class_id,
-        file_path,
-        graph,
-    )
+
+def _nested_functions(
+    body: Node | None,
+    file_path: str,
+    module_id: str,
+    func_id: str,
+    graph: CodeGraph,
+    *,
+    class_id: str | None,
+) -> None:
+    if body is not None:
+        for nested in walk_owned(body, root_is_owner=False, boundaries=_CALLABLE_TYPES):
+            if nested.type in {"function_definition", "anonymous_function", "arrow_function"}:
+                name = nested.child_by_field_name("name")
+                _extract_function(
+                    nested,
+                    file_path,
+                    module_id,
+                    class_id,
+                    graph,
+                    owner_id=func_id,
+                    name_override=node_text(name)
+                    if name is not None
+                    else f"$lambda@{nested.start_point.row + 1}_{nested.start_point.column}",
+                )
 
 
 def _add_call_edges(
@@ -324,26 +415,71 @@ def _add_call_edges(
     func_id: str,
     module_id: str,
     class_id: str | None,
+    *,
     file_path: str,
     graph: CodeGraph,
 ) -> None:
-    """Add CALLS edges for all collected call sites."""
-    for call_name, call_node in calls:
-        target_id = _resolve_call_target(
-            call_name,
-            module_id,
-            class_id,
-        )
-        confidence = _call_confidence(call_name)
+    """Add located PHP targets without mixing namespace and receiver policies."""
+    for name, site in calls:
+        target, confidence = _php_call_target(name, site, module_id, class_id, graph)
         graph.edges.append(
             CodeEdge(
                 source_id=func_id,
-                target_id=target_id,
+                target_id=target,
                 kind=EdgeKind.CALLS,
                 confidence=confidence,
-                location=make_location(call_node, file_path),
+                location=make_location(site, file_path),
+                attributes=_php_call_attributes(name, site, module_id),
             )
         )
+
+
+def _php_call_attributes(name: str, site: Node, module: str) -> tuple[tuple[str, str | bool], ...]:
+    if site.type != "function_call_expression" or name.startswith("$"):
+        return ()
+    return (
+        ("php_function_target", _php_reference_id(site, module, name).split(":", 1)[-1]),
+        ("php_global_fallback", "\\" not in name),
+    )
+
+
+def _php_call_target(
+    name: str,
+    site: Node,
+    module: str,
+    owner: str | None,
+    graph: CodeGraph,
+) -> tuple[str, EdgeConfidence]:
+    if site.type == "function_call_expression" and not name.startswith("$"):
+        return _php_reference_id(site, module, name), _call_confidence(name)
+    if site.type == "scoped_call_expression":
+        return _php_scoped_target(name, site, module, owner, graph)
+    return _resolve_call_target(name, module, owner), _call_confidence(name)
+
+
+def _php_scoped_target(
+    name: str,
+    site: Node,
+    module: str,
+    owner: str | None,
+    graph: CodeGraph,
+) -> tuple[str, EdgeConfidence]:
+    scope, _, method = name.partition("::")
+    if scope == "self" and owner is not None:
+        return f"{owner}.{method}", EdgeConfidence.CERTAIN
+    if scope == "parent" and owner is not None:
+        return _php_parent_target(name, module, owner, method, graph), EdgeConfidence.INFERRED
+    if scope == "static":
+        return _resolve_call_target(name, module, owner), EdgeConfidence.UNCERTAIN
+    target = name if scope.startswith("$") else f"{_php_reference_id(site, module, scope)}.{method}"
+    return target, EdgeConfidence.INFERRED
+
+
+def _php_parent_target(name: str, module: str, owner: str, method: str, graph: CodeGraph) -> str:
+    bases = [
+        e.target_id for e in graph.edges if e.source_id == owner and e.kind == EdgeKind.INHERITS
+    ]
+    return f"{bases[0]}.{method}" if len(bases) == 1 else _resolve_call_target(name, module, owner)
 
 
 def _call_confidence(call_name: str) -> EdgeConfidence:
@@ -361,14 +497,13 @@ def _collect_php_body_info(
     calls: list[tuple[str, Node]],
 ) -> None:
     """Collect branches, exceptions, and calls from a PHP body."""
-    for child in body.children:
-        _visit_php_body_node(
-            child,
-            file_path,
-            branches,
-            exception_types,
-            calls,
-        )
+    _visit_php_body_node(
+        body,
+        file_path,
+        branches,
+        exception_types,
+        calls,
+    )
 
 
 def _visit_php_body_node(
@@ -379,6 +514,8 @@ def _visit_php_body_node(
     calls: list[tuple[str, Node]],
 ) -> None:
     """Visit a single node in a PHP function body."""
+    if node.type in _CALLABLE_TYPES:
+        return
     if node.type in _BRANCH_NODE_TYPES:
         condition = _extract_condition_text(node)
         branches.append(
@@ -393,7 +530,11 @@ def _visit_php_body_node(
 
     if node.type in _CALL_TYPES:
         call_name = _extract_php_call_name(node)
-        if call_name:
+        arguments = node.child_by_field_name("arguments")
+        acquisition = arguments is not None and any(
+            child.type == "variadic_placeholder" for child in arguments.named_children
+        )
+        if call_name and not acquisition:
             calls.append((call_name, node))
 
     for child in node.children:
@@ -433,13 +574,18 @@ def _extract_php_call_name(node: Node) -> str:
         func = node.child_by_field_name("function")
         if func is not None:
             return node_text(func)
-    elif node.type == "member_call_expression":
+    elif node.type in {"member_call_expression", "nullsafe_member_call_expression"}:
         name = node.child_by_field_name("name")
         obj = node.child_by_field_name("object")
         if name is not None and obj is not None:
             return f"{node_text(obj)}->{node_text(name)}"
         if name is not None:
             return node_text(name)
+    elif node.type == "scoped_call_expression":
+        scope = node.child_by_field_name("scope")
+        name = node.child_by_field_name("name")
+        if scope is not None and name is not None:
+            return f"{node_text(scope)}::{node_text(name)}"
     return ""
 
 
@@ -553,3 +699,15 @@ def _resolve_call_target(
     if "->" not in call_name and "::" not in call_name:
         return f"{module_id}:{call_name}"
     return call_name
+
+
+def _namespace_owner(node: Node, module: str) -> str:
+    namespace = _NAMESPACE.get().replace("\\", ".")
+    return f"{module}:{namespace}" if namespace else module
+
+
+def _php_reference_id(node: Node, module: str, name: str) -> str:
+    absolute = name.startswith("\\")
+    name = name.lstrip("\\").replace("\\", ".")
+    namespace = "" if absolute else _NAMESPACE.get().replace("\\", ".")
+    return f"{module}:{namespace}.{name}" if namespace else f"{module}:{name}"

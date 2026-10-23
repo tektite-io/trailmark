@@ -135,6 +135,17 @@ Sway, and Tact are `uncertain`. To find unresolved calls, look for edges to
 `uncertain`. `type_uses` edges are `certain` even though they come from name
 matching.
 
+Call edge attributes can preserve binding provenance. `import_binding` marks a
+JavaScript/TypeScript literal `require` named-export binding and prevents unrelated
+free-function fallback. `indirect_call` records pointer or field-call syntax; it
+remains present if callback-table inference later gives the edge an inferred target.
+The confidence describes target resolution, while this attribute describes syntax.
+`include_unverified=True` marks a C/C++ header-static link for which the resolver
+could not verify an include path in either direction. It does not establish that
+the caller lacks an include: compiler search paths and translation-unit context
+may supply one. Consumers can distinguish these fallback links from verified
+include-supported links without changing the edge's confidence.
+
 ## Node IDs
 
 IDs have the form `module:function`, `module:Class`, or `module:Class.method`.
@@ -151,14 +162,17 @@ IDs have the form `module:function`, `module:Class`, or `module:Class.method`.
 - **Nested declarations** include their owners: Java nested classes are
   `module:Outer.Inner`, and Solidity contract-level structs and enums are
   `module:Contract.Name`.
-- **Overloads** in Solidity, C++, Java, C#, Kotlin, and Swift keep separate
+- **Repeated callables** in Python and overloads in Solidity, C++, Java, C#, Kotlin,
+  and Swift keep separate
   declarations and bodies. Colliding callable IDs gain an `@line_column` suffix,
   for example `token:Token.f@12_4`. When a type and a callable share an ID, the
   type keeps the base ID.
 - **Rust local items** keep their enclosing function in the ID, and repeated
   local names gain a byte-offset suffix. See [Rust](languages.md#rust-and-verus).
-- **Declared package and namespace IDs** (for example, Protobuf and Thrift
-  packages) are not renamed. An unresolved collision between languages raises
+- **Declared package IDs** (for example, Protobuf packages) are not renamed.
+  Thrift uses source-file module identity; target-language namespaces are
+  metadata and never merge declarations from independent IDL files.
+  An unresolved collision between languages raises
   `ValueError` rather than merging unrelated nodes.
 
 Position-based suffixes change when code above the declaration changes, so
@@ -225,3 +239,11 @@ After each file is parsed, Trailmark links the graph by name:
 
 Compiler-level import, receiver, and overload semantics are not modeled. See
 [Language notes](languages.md) for per-language rules.
+
+
+Nested callable declarations also have conservative owner-to-body `calls` edges
+with `uncertain` confidence and a `deferred` attribute. This keeps callback paths
+visible in reachability queries without asserting immediate invocation. Confidence
+records target binding; a parse error elsewhere in a C function does not by itself
+lower confidence. Broken call contexts carry `syntax_error_context`; recovered C
+bodies retain their documented uncertain calls.

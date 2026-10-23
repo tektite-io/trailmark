@@ -46,6 +46,7 @@ WordPress, Rails, Cobra, axum, warp, clap, etc.).
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 import tomllib
 from pathlib import Path
@@ -91,7 +92,10 @@ _RS_HTTP_ATTR = re.compile(
 _RS_ASYNC_MAIN_ATTR = re.compile(r"^\s*#\[\s*\w+::main\s*\]\s*$")
 
 # Rust FFI export: #[no_mangle] or `pub extern "C" fn`
-_RS_NO_MANGLE = re.compile(r"^\s*#\[\s*no_mangle\s*\]\s*$")
+_RS_NO_MANGLE = re.compile(
+    r"^\s*#\[\s*(?:unsafe\s*\(\s*)?(?:no_mangle|export_name\s*=\s*"
+    r'"[^"\\]*(?:\\.[^"\\]*)*")\s*\)?\s*\]\s*$'
+)
 _RS_EXTERN_C_FN = re.compile(r"\bpub\s+(?:unsafe\s+)?extern\s+\"C\"\s+fn\b")
 
 # JS/TS — NestJS method decorators: @Get(), @Post(), @Put(), @Delete(), @Patch(),
@@ -263,6 +267,12 @@ def _detect_framework_entrypoints(graph: CodeGraph) -> dict[str, EntrypointTag]:
     Objective-C headers also use the node kind to select a detector.
     """
     cache = _SourceCache(graph.language)
+    cache.servlet_owners = {
+        e.target_id: e.source_id for e in graph.edges if e.kind == EdgeKind.CONTAINS
+    }
+    for edge in graph.edges:
+        if edge.kind == EdgeKind.INHERITS:
+            cache.servlet_bases.setdefault(edge.source_id, []).append(edge.target_id)
     result: dict[str, EntrypointTag] = {}
     for node_id, unit in graph.nodes.items():
         if unit.kind.value not in {"function", "method"}:
@@ -271,7 +281,7 @@ def _detect_framework_entrypoints(graph: CodeGraph) -> dict[str, EntrypointTag]:
         if not path:
             continue
 
-        tag = _detect_for_unit(cache, unit, path)
+        tag = _detect_for_unit(cache, unit, path, graph)
         if tag is not None:
             result[node_id] = tag
     _annotate_overridden_solidity_entrypoints(graph, result)
@@ -279,80 +289,42 @@ def _detect_framework_entrypoints(graph: CodeGraph) -> dict[str, EntrypointTag]:
 
 
 def _detect_for_unit(
+    cache: _SourceCache, unit: CodeUnit, path: str, graph: CodeGraph
+) -> EntrypointTag | None:
+    extension = Path(path).suffix.lower()
+    if extension == ".java":
+        return _detect_java(
+            cache, unit, path, servlet_callback=_java_servlet_callback(graph, unit, cache)
+        )
+    if extension == ".h" and unit.kind == NodeKind.METHOD:
+        return _detect_objc(unit)
+    if extension == ".zig" and dict(unit.attributes).get("zig_export"):
+        return _export_tag("Zig exported function")
+    if extension == ".ak" and _unit_attr(unit, "aiken_handler"):
+        return _export_tag("Aiken validator handler")
+    return _detect_registered(extension, cache, unit, path)
+
+
+def _detect_registered(
+    extension: str,
     cache: _SourceCache,
     unit: CodeUnit,
     path: str,
 ) -> EntrypointTag | None:
-    extension = Path(path).suffix.lower()
-    if extension == ".py":
-        return _detect_python(cache, unit, path)
-    if extension == ".rs":
-        return _detect_rust(cache, unit, path)
-    if extension == ".zig" and dict(unit.attributes).get("zig_export"):
-        return EntrypointTag(
-            kind=EntrypointKind.API,
-            trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
-            description="Zig exported function",
-            asset_value=AssetValue.HIGH,
-        )
-    if extension == ".sol":
-        return _detect_solidity(cache, unit, path)
-    if extension == ".ak" and _unit_attr(unit, "aiken_handler"):
-        return EntrypointTag(
-            kind=EntrypointKind.API,
-            trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
-            description="Aiken validator handler",
-            asset_value=AssetValue.HIGH,
-        )
-    if extension in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
-        return _detect_js_ts(cache, unit, path)
-    if extension == ".java":
-        return _detect_java(cache, unit, path)
-    if extension == ".cs":
-        return _detect_csharp(cache, unit, path)
-    if extension == ".php":
-        return _detect_php(cache, unit, path)
-    if extension == ".cairo":
-        return _detect_cairo(cache, unit, path)
-    if extension == ".circom":
-        return _detect_circom(cache, unit, path)
-    if extension == ".masm":
-        return _detect_masm(cache, unit, path)
-    if extension == ".hs":
-        return _detect_haskell(cache, unit, path)
-    if extension == ".erl":
-        return _detect_erlang(cache, unit, path)
-    if extension == ".swift":
-        return _detect_swift(cache, unit, path)
-    if extension in {".m", ".mm"} or (extension == ".h" and unit.kind == NodeKind.METHOD):
-        return _detect_objc(unit)
-    if extension in {".kt", ".kts"}:
-        return _detect_kotlin(cache, unit, path)
-    if extension == ".dart":
-        return _detect_dart(cache, unit, path)
-    if extension == ".move":
-        return _detect_move(cache, unit, path)
-    if extension == ".tact":
-        return _detect_tact(unit)
-    if extension in {".fc", ".func"}:
-        return _detect_func(unit)
-    if extension == ".sw":
-        return _detect_sway(cache, unit, path)
-    if extension == ".rego":
-        return _detect_rego(unit)
-    if extension == ".proto":
-        return _detect_proto(cache, unit, path)
-    if extension == ".thrift":
-        return _detect_thrift(cache, unit, path)
-    if extension in {".graphql", ".gql"}:
-        return _detect_graphql(unit)
-    if extension == ".go":
-        return _detect_go(cache, unit, path)
-    if extension == ".rb":
-        return _detect_ruby(cache, unit, path)
-    if extension in {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"}:
-        return _detect_c_cpp(cache, unit, path)
+    if detector := _SOURCE_DETECTORS.get(extension):
+        return detector(cache, unit, path)
+    if detector := _UNIT_DETECTORS.get(extension):
+        return detector(unit)
     return None
+
+
+def _export_tag(description: str) -> EntrypointTag:
+    return EntrypointTag(
+        kind=EntrypointKind.API,
+        trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
+        description=description,
+        asset_value=AssetValue.HIGH,
+    )
 
 
 def _detect_python(
@@ -575,10 +547,45 @@ def _detect_nextjs_route(unit: CodeUnit, path: str) -> EntrypointTag | None:
     return None
 
 
+def _java_servlet_callback(graph: CodeGraph, unit: CodeUnit, cache: _SourceCache) -> bool:
+    if (
+        unit.kind != NodeKind.METHOD
+        or dict(unit.attributes).get("java_static")
+        or dict(unit.attributes).get("java_private")
+        or len(unit.parameters) != 2
+        or unit.return_type is None
+        or unit.return_type.name != "void"
+    ):
+        return False
+    types = [
+        p.type_ref.name.rsplit(".", 1)[-1] if p.type_ref is not None else ""
+        for p in unit.parameters
+    ]
+    if types != ["HttpServletRequest", "HttpServletResponse"]:
+        return False
+    pending = [cache.servlet_owners.get(unit.id, "")]
+    seen = set()
+    while pending:
+        owner = pending.pop()
+        if owner in seen:
+            continue
+        seen.add(owner)
+        declaration = graph.nodes.get(owner)
+        if (
+            declaration is not None
+            and dict(declaration.attributes).get("java_servlet_base") is True
+        ):
+            return True
+        pending.extend(cache.servlet_bases.get(owner, ()))
+    return False
+
+
 def _detect_java(
     cache: _SourceCache,
     unit: CodeUnit,
     path: str,
+    *,
+    servlet_callback: bool = False,
 ) -> EntrypointTag | None:
     decorators = cache.declarations.decorators(unit)
     for line in decorators:
@@ -604,7 +611,15 @@ def _detect_java(
                 asset_value=AssetValue.MEDIUM,
             )
     # Servlet convention: method names doGet/doPost/... on an HttpServlet.
-    if unit.name in {"doGet", "doPost", "doPut", "doDelete", "doHead", "doOptions", "doTrace"}:
+    if servlet_callback and unit.name in {
+        "doGet",
+        "doPost",
+        "doPut",
+        "doDelete",
+        "doHead",
+        "doOptions",
+        "doTrace",
+    }:
         return EntrypointTag(
             kind=EntrypointKind.API,
             trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
@@ -660,6 +675,13 @@ def _detect_cairo(
     unit: CodeUnit,
     path: str,
 ) -> EntrypointTag | None:
+    if dict(unit.attributes).get("cairo_abi") is True:
+        return EntrypointTag(
+            kind=EntrypointKind.API,
+            trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
+            description="Cairo/StarkNet embedded ABI method",
+            asset_value=AssetValue.HIGH,
+        )
     decorators = cache.declarations.decorators(unit)
     for line in decorators:
         if _CAIRO_CONTRACT_ATTR.match(line):
@@ -694,8 +716,16 @@ def _detect_masm(
     unit: CodeUnit,
     path: str,
 ) -> EntrypointTag | None:
+    role = _unit_attr(unit, "masm_role")
+    if role == "program":
+        return EntrypointTag(
+            kind=EntrypointKind.USER_INPUT,
+            trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
+            description="Miden Assembly program begin block",
+            asset_value=AssetValue.HIGH,
+        )
     signature = cache.line(path, unit.location.start_line) or ""
-    if _MASM_EXPORT.match(signature):
+    if role == "public" or _MASM_EXPORT.match(signature):
         return EntrypointTag(
             kind=EntrypointKind.API,
             trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
@@ -730,10 +760,7 @@ def _detect_erlang(
     path: str,
 ) -> EntrypointTag | None:
     """Mark any function listed in -export([...]) as an entrypoint."""
-    exported = _erlang_exported_names(cache, path)
-    if not exported:
-        return None
-    if unit.name in exported:
+    if dict(unit.attributes).get("erlang_exported") is True:
         return EntrypointTag(
             kind=EntrypointKind.API,
             trust_level=TrustLevel.SEMI_TRUSTED_EXTERNAL,
@@ -867,27 +894,21 @@ def _detect_ruby(
     ``include Sidekiq::Job``. Their ``perform`` method handles queue
     messages — only that one method is tagged per worker class.
     """
-    controllers = cache.ruby_rails_controller_classes(path)
-    workers = cache.ruby_sidekiq_worker_classes(path)
-    if not controllers and not workers:
-        return None
-
-    # Node IDs look like "module:ClassName.method" for methods, or just
-    # "module:ClassName" for the class itself. Only tag method nodes.
-    if unit.kind.value != "method":
-        return None
-    node_id = unit.id
-    if ":" not in node_id or "." not in node_id:
-        return None
-    class_part = node_id.split(":", 1)[1].split(".", 1)[0]
-    if class_part in controllers:
+    attributes = dict(unit.attributes)
+    instance = attributes.get("ruby_receiver") == "instance"
+    if (
+        instance
+        and attributes.get("ruby_controller") is True
+        and attributes.get("ruby_visibility") == "public"
+        and unit.name != "initialize"
+    ):
         return EntrypointTag(
             kind=EntrypointKind.API,
             trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
             description="Rails controller action",
             asset_value=AssetValue.HIGH,
         )
-    if class_part in workers and unit.name == "perform":
+    if instance and attributes.get("ruby_worker") is True and unit.name == "perform":
         return EntrypointTag(
             kind=EntrypointKind.THIRD_PARTY,
             trust_level=TrustLevel.SEMI_TRUSTED_EXTERNAL,
@@ -954,8 +975,10 @@ def _detect_move(
     unit: CodeUnit,
     path: str,
 ) -> EntrypointTag | None:
-    signature = cache.signature_block(path, unit.location.start_line) or ""
-    if unit.kind.value == "function" and (" entry " in signature or "public" in signature):
+    attributes = dict(unit.attributes)
+    if unit.kind.value == "function" and (
+        attributes.get("move_entry") or attributes.get("move_public")
+    ):
         return EntrypointTag(
             kind=EntrypointKind.API,
             trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
@@ -978,7 +1001,9 @@ def _detect_tact(unit: CodeUnit) -> EntrypointTag | None:
 
 
 def _detect_func(unit: CodeUnit) -> EntrypointTag | None:
-    if unit.name in {"recv_internal", "recv_external"} or unit.name.startswith("get_"):
+    if unit.name in {"recv_internal", "recv_external", "run_ticktock"} or "func_method_id" in dict(
+        unit.attributes
+    ):
         return EntrypointTag(
             kind=EntrypointKind.API,
             trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
@@ -1001,11 +1026,7 @@ def _detect_sway(
             description="Sway public function",
             asset_value=AssetValue.HIGH,
         )
-    if (
-        unit.kind.value == "method"
-        and re.search(r"\bfn\s+\w+\s*\(", signature)
-        and ";" in signature
-    ):
+    if unit.kind.value == "method" and dict(unit.attributes).get("sway_abi") is True:
         return EntrypointTag(
             kind=EntrypointKind.API,
             trust_level=TrustLevel.UNTRUSTED_EXTERNAL,
@@ -1099,6 +1120,8 @@ class _SourceCache:
     """Lazily reads and caches source files during a detection pass."""
 
     def __init__(self, language: str | None = None) -> None:
+        self.servlet_owners: dict[str, str] = {}
+        self.servlet_bases: dict[str, list[str]] = {}
         self._lines: dict[str, list[str]] = {}
         self._scan_cache: dict[str, set[str]] = {}
         self.declarations = DeclarationCache(language)
@@ -1409,6 +1432,7 @@ def _entry_to_matches(
     if isinstance(node_ref, str):
         node_id = _resolve_override_node(graph, node_ref)
         if node_id is None:
+            logging.getLogger(__name__).warning("Entrypoint override matches no node: %s", node_ref)
             return []
         return [(node_id, tag)]
 
@@ -1563,3 +1587,42 @@ def _resolve_override_node(graph: CodeGraph, reference: str) -> str | None:
         module_path, func_name = reference.rsplit(":", 1)
         return _resolve_script_target(graph, module_path, func_name)
     return None
+
+
+_SOURCE_DETECTORS = {
+    extension: detector
+    for extensions, detector in (
+        ((".py",), _detect_python),
+        ((".rs",), _detect_rust),
+        ((".sol",), _detect_solidity),
+        ((".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"), _detect_js_ts),
+        ((".cs",), _detect_csharp),
+        ((".php",), _detect_php),
+        ((".cairo",), _detect_cairo),
+        ((".circom",), _detect_circom),
+        ((".masm",), _detect_masm),
+        ((".hs",), _detect_haskell),
+        ((".erl",), _detect_erlang),
+        ((".swift",), _detect_swift),
+        ((".kt", ".kts"), _detect_kotlin),
+        ((".dart",), _detect_dart),
+        ((".move",), _detect_move),
+        ((".sw",), _detect_sway),
+        ((".proto",), _detect_proto),
+        ((".thrift",), _detect_thrift),
+        ((".go",), _detect_go),
+        ((".rb",), _detect_ruby),
+        ((".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"), _detect_c_cpp),
+    )
+    for extension in extensions
+}
+_UNIT_DETECTORS = {
+    ".m": _detect_objc,
+    ".mm": _detect_objc,
+    ".tact": _detect_tact,
+    ".fc": _detect_func,
+    ".func": _detect_func,
+    ".rego": _detect_rego,
+    ".graphql": _detect_graphql,
+    ".gql": _detect_graphql,
+}
